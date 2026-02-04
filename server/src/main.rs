@@ -71,6 +71,9 @@ async fn main() -> Result<()> {
 
     match opts.mode {
         ServerMode::Monolithic => {
+            #[cfg(feature = "turso")]
+            attic_server::run_turso_migrations(config.clone()).await?;
+            #[cfg(not(feature = "turso"))]
             attic_server::run_migrations(config.clone()).await?;
 
             let (api_server, _) = join!(
@@ -87,6 +90,9 @@ async fn main() -> Result<()> {
             attic_server::gc::run_garbage_collection(config.clone()).await;
         }
         ServerMode::DbMigrations => {
+            #[cfg(feature = "turso")]
+            attic_server::run_turso_migrations(config).await?;
+            #[cfg(not(feature = "turso"))]
             attic_server::run_migrations(config).await?;
         }
         ServerMode::GarbageCollectorOnce => {
