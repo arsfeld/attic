@@ -114,9 +114,10 @@ pub(crate) async fn configure_cache(
                 retention_period_val = Some(None);
             }
             RetentionPeriodConfig::Period(period) => {
-                retention_period_val = Some(Some(period.try_into().map_err(|_| {
-                    ErrorKind::RequestError(anyhow!("Invalid retention period"))
-                })?));
+                retention_period_val =
+                    Some(Some(period.try_into().map_err(|_| {
+                        ErrorKind::RequestError(anyhow!("Invalid retention period"))
+                    })?));
             }
         }
 

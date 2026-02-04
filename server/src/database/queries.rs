@@ -666,13 +666,7 @@ pub async fn insert_chunkref(
     let mut rows = conn
         .query(
             sql,
-            (
-                nar_id,
-                seq as i64,
-                chunk_id_str,
-                chunk_hash,
-                compression,
-            ),
+            (nar_id, seq as i64, chunk_id_str, chunk_hash, compression),
         )
         .await
         .map_err(db_err)?;
@@ -698,7 +692,9 @@ pub async fn find_chunkref_missing_chunk(
     let mut rows = conn.query(sql, [nar_id]).await.map_err(db_err)?;
 
     match rows.next().await.map_err(db_err)? {
-        Some(row) => Ok(Some(super::models::ChunkRefModel::from_row(&row).map_err(db_err)?)),
+        Some(row) => Ok(Some(
+            super::models::ChunkRefModel::from_row(&row).map_err(db_err)?,
+        )),
         None => Ok(None),
     }
 }

@@ -625,7 +625,8 @@ async fn upload_chunk(
     let backend = state.storage().await?;
     let remote_file = backend.make_db_reference(key.clone()).await?;
     let remote_file_id = remote_file.remote_file_id();
-    let remote_file_json = serde_json::to_string(&remote_file).map_err(ServerError::request_error)?;
+    let remote_file_json =
+        serde_json::to_string(&remote_file).map_err(ServerError::request_error)?;
 
     let chunk_size_db = i64::try_from(given_chunk_size).map_err(ServerError::request_error)?;
 

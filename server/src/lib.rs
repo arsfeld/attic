@@ -107,9 +107,9 @@ impl StateInner {
         self.database
             .get_or_try_init(|| async {
                 let turso_config = TursoConfig::from_database_config(&self.config.database);
-                TursoConnection::connect(turso_config).await.map_err(|e| {
-                    ServerError::database_error(database::TursoDbError(e.to_string()))
-                })
+                TursoConnection::connect(turso_config)
+                    .await
+                    .map_err(|e| ServerError::database_error(database::TursoDbError(e.to_string())))
             })
             .await
     }
