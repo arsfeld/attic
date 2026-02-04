@@ -1702,8 +1702,7 @@ mod tests {
         // This will fail because the query uses unquoted `references`
         let cache_name: attic::cache::CacheName = "find-test".parse().expect("Invalid cache name");
         // Store path hash must be exactly 32 characters
-        let store_path_hash =
-            attic::nix_store::StorePathHash::new(hash_32.to_string()).unwrap();
+        let store_path_hash = attic::nix_store::StorePathHash::new(hash_32.to_string()).unwrap();
 
         let result =
             find_object_and_chunks_by_store_path_hash(&conn, &cache_name, &store_path_hash, false)
@@ -1727,9 +1726,16 @@ mod tests {
             .await
             .expect("Create cache failed");
 
-        let nar = create_nar(&conn, "sha256:chunkednar789", 4096, "zstd", 1, NarState::Valid)
-            .await
-            .expect("Create NAR failed");
+        let nar = create_nar(
+            &conn,
+            "sha256:chunkednar789",
+            4096,
+            "zstd",
+            1,
+            NarState::Valid,
+        )
+        .await
+        .expect("Create NAR failed");
 
         // Insert chunk (remote_file is a tagged enum: {"Local": {"name": "..."}} or {"S3": {...}})
         let chunk = insert_chunk(
@@ -1760,9 +1766,9 @@ mod tests {
         .expect("Insert object failed");
 
         // Now try to find it with chunks
-        let cache_name: attic::cache::CacheName = "chunks-test".parse().expect("Invalid cache name");
-        let store_path_hash =
-            attic::nix_store::StorePathHash::new(hash_32.to_string()).unwrap();
+        let cache_name: attic::cache::CacheName =
+            "chunks-test".parse().expect("Invalid cache name");
+        let store_path_hash = attic::nix_store::StorePathHash::new(hash_32.to_string()).unwrap();
 
         let result =
             find_object_and_chunks_by_store_path_hash(&conn, &cache_name, &store_path_hash, true)
