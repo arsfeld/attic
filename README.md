@@ -1,9 +1,9 @@
-# Attic
+# Attic (libSQL Fork)
+
+> **Note**: This is a fork of [zhaofengli/attic](https://github.com/zhaofengli/attic) that uses libSQL/Turso exclusively as the database backend.
 
 **Attic** is a self-hostable Nix Binary Cache server backed by an S3-compatible storage provider.
 It has support for global deduplication and garbage collection.
-
-Attic is an early prototype.
 
 ```
 ⚙️ Pushing 5 paths to "demo" on "local" (566 already cached, 2001 in upstream)...
@@ -14,11 +14,6 @@ Attic is an early prototype.
 🕓 zoom-5.12.9.367      ███████████████████████████              329.36 MiB (39.47 MiB/s)
 ```
 
-## Try it out (15 minutes)
-
-Let's [spin up Attic](https://docs.attic.rs/tutorial.html) in just 15 minutes.
-And yes, it works on macOS too!
-
 ## Goals
 
 - **Multi-Tenancy**: Create a private cache for yourself, and one for friends and co-workers. Tenants are mutually untrusting and cannot pollute the views of other caches.
@@ -27,60 +22,39 @@ And yes, it works on macOS too!
 - **Scalabilty**: Attic can be easily replicated. It's designed to be deployed to serverless platforms like fly.io but also works nicely in a single-machine setup.
 - **Garbage Collection**: Unused store paths can be garbage-collected in an LRU manner.
 
-## Database Backends
+## Database
 
-Attic supports multiple database backends:
+This fork uses [libSQL](https://github.com/tursodatabase/libsql) (the database behind [Turso](https://turso.tech/)) as its only database backend. This provides:
 
-### SeaORM (Default)
+- **No cold starts**: Turso databases are always-on
+- **Microsecond reads**: Embedded replicas sync locally for ultra-fast reads
+- **SQLite compatibility**: Uses familiar SQLite SQL syntax
+- **Edge deployment**: Perfect for serverless platforms like Fly.io
 
-The default backend uses SeaORM with support for PostgreSQL and SQLite:
+### Building
 
 ```bash
-# Build with default features (PostgreSQL + SQLite)
 cargo build -p attic-server
 ```
 
-Configuration:
+### Configuration
+
 ```toml
 [database]
-url = "sqlite:///path/to/attic.db"
-# or
-url = "postgres://user:pass@host/attic"
-```
-
-### Turso (libSQL)
-
-For deployments on platforms like Fly.io where fast startup times are critical, Attic supports [Turso](https://turso.tech/) - a distributed SQLite database with embedded replicas:
-
-```bash
-# Build with Turso support
-cargo build -p attic-server --no-default-features --features turso
-```
-
-Configuration:
-```toml
-[database]
+# Remote Turso database
 url = "libsql://your-db.turso.io"
 auth_token = "your-turso-auth-token"
+
 # Optional: Use embedded replica for microsecond reads
 local_replica_path = "/tmp/attic-replica.db"
 sync_interval = 60  # seconds
 ```
 
-Benefits of Turso:
-- **No cold starts**: Turso databases are always-on
-- **Microsecond reads**: Embedded replicas sync locally for ultra-fast reads
-- **SQLite compatibility**: Uses familiar SQLite SQL syntax
+For local development, you can use a local SQLite file:
 
-#### Migrating from SQLite to Turso
-
-Use the built-in migration tool:
-
-```bash
-atticadm migrate-to-turso \
-    --source /path/to/attic.db \
-    --turso-url libsql://your-db.turso.io \
-    --auth-token $TURSO_AUTH_TOKEN
+```toml
+[database]
+url = "file:///path/to/attic.db"
 ```
 
 ## Licensing

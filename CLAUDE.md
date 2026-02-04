@@ -62,7 +62,7 @@ attic/                    # Cargo workspace root
 
 - `api/` - HTTP endpoints (Axum routes, binary cache compatibility)
 - `storage/` - Backend abstraction (`StorageBackend` trait: local filesystem, S3)
-- `database/` - SeaORM entities (Cache, Object, NAR, Chunk) and migrations
+- `database/` - libSQL database layer (connection, models, queries) and migrations
 - `gc.rs` - Garbage collection daemon
 - `compression.rs` - Stream compression (zstd, brotli, xz)
 
@@ -97,9 +97,11 @@ Default: `["chunking", "io", "nix_store", "tokio"]`
 
 ## Database
 
-- PostgreSQL (recommended for production)
-- SQLite (default, good for small deployments)
+This fork uses libSQL/Turso exclusively (no SeaORM):
+- Remote Turso databases for production (`libsql://` URLs)
+- Local SQLite files for development (`file://` URLs)
 - Migrations run automatically or via `atticd --mode db-migrations`
+- Database layer in `server/src/database/`: connection, models, queries, migrations
 
 ## Code Quality
 

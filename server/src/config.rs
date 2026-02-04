@@ -211,9 +211,8 @@ pub struct DatabaseConfig {
     /// Connection URL.
     ///
     /// Supports:
-    /// - `sqlite://path/to/db.sqlite` - Local SQLite database
-    /// - `postgres://...` - PostgreSQL database (SeaORM only)
-    /// - `libsql://xxx.turso.io` - Turso cloud database (Turso feature only)
+    /// - `file:///path/to/db.sqlite` - Local SQLite database
+    /// - `libsql://xxx.turso.io` - Turso cloud database
     #[serde(default = "load_database_url_from_env")]
     pub url: String,
 

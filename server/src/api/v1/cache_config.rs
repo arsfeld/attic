@@ -2,15 +2,10 @@
 
 use anyhow::anyhow;
 use axum::extract::{Extension, Json, Path};
-use chrono::Utc;
-use sea_orm::sea_query::{Expr, OnConflict};
-use sea_orm::ActiveValue::Set;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use tracing::instrument;
 
-use crate::database::entity::cache::{self, Entity as Cache};
-use crate::database::entity::Json as DbJson;
-use crate::error::{ErrorKind, ServerError, ServerResult};
+use crate::database::queries;
+use crate::error::{ErrorKind, ServerResult};
 use crate::{RequestState, State};
 use attic::api::v1::cache_config::{
     CacheConfig, CreateCacheRequest, KeypairConfig, RetentionPeriodConfig,
@@ -70,10 +65,12 @@ pub(crate) async fn configure_cache(
         })
         .await?;
 
-    let mut update = cache::ActiveModel {
-        id: Set(cache.id),
-        ..Default::default()
-    };
+    let mut keypair_str = None;
+    let mut is_public_val = None;
+    let mut store_dir_str = None;
+    let mut priority_val = None;
+    let mut upstream_json = None;
+    let mut retention_period_val: Option<Option<i32>> = None;
 
     let mut modified = false;
 
@@ -82,27 +79,30 @@ pub(crate) async fn configure_cache(
             KeypairConfig::Generate => NixKeypair::generate(cache_name.as_str())?,
             KeypairConfig::Keypair(k) => k,
         };
-        update.keypair = Set(keypair.export_keypair());
+        keypair_str = Some(keypair.export_keypair());
         modified = true;
     }
 
     if let Some(is_public) = payload.is_public {
-        update.is_public = Set(is_public);
+        is_public_val = Some(is_public);
         modified = true;
     }
 
     if let Some(store_dir) = payload.store_dir {
-        update.store_dir = Set(store_dir);
+        store_dir_str = Some(store_dir);
         modified = true;
     }
 
     if let Some(priority) = payload.priority {
-        update.priority = Set(priority);
+        priority_val = Some(priority);
         modified = true;
     }
 
     if let Some(upstream_cache_key_names) = payload.upstream_cache_key_names {
-        update.upstream_cache_key_names = Set(DbJson(upstream_cache_key_names));
+        upstream_json = Some(
+            serde_json::to_string(&upstream_cache_key_names)
+                .map_err(|e| ErrorKind::RequestError(e.into()))?,
+        );
         modified = true;
     }
 
@@ -111,13 +111,12 @@ pub(crate) async fn configure_cache(
 
         match retention_period_config {
             RetentionPeriodConfig::Global => {
-                update.retention_period = Set(None);
+                retention_period_val = Some(None);
             }
             RetentionPeriodConfig::Period(period) => {
-                update.retention_period =
-                    Set(Some(period.try_into().map_err(|_| {
-                        ErrorKind::RequestError(anyhow!("Invalid retention period"))
-                    })?));
+                retention_period_val = Some(Some(period.try_into().map_err(|_| {
+                    ErrorKind::RequestError(anyhow!("Invalid retention period"))
+                })?));
             }
         }
 
@@ -125,10 +124,17 @@ pub(crate) async fn configure_cache(
     }
 
     if modified {
-        Cache::update(update)
-            .exec(database)
-            .await
-            .map_err(ServerError::database_error)?;
+        queries::update_cache(
+            database,
+            cache.id,
+            keypair_str.as_deref(),
+            is_public_val,
+            store_dir_str.as_deref(),
+            priority_val,
+            upstream_json.as_deref(),
+            retention_period_val,
+        )
+        .await?;
 
         Ok(())
     } else {
@@ -153,34 +159,17 @@ pub(crate) async fn destroy_cache(
 
     if state.config.soft_delete_caches {
         // Perform soft deletion
-        let deletion = Cache::update_many()
-            .col_expr(cache::Column::DeletedAt, Expr::value(Some(Utc::now())))
-            .filter(cache::Column::Id.eq(cache.id))
-            .filter(cache::Column::DeletedAt.is_null())
-            .exec(database)
-            .await
-            .map_err(ServerError::database_error)?;
-
-        if deletion.rows_affected == 0 {
-            // Someone raced to (soft) delete the cache before us
-            Err(ErrorKind::NoSuchCache.into())
-        } else {
-            Ok(())
+        let deleted = queries::soft_delete_cache(database, cache.id).await;
+        match deleted {
+            Ok(()) => Ok(()),
+            Err(_) => Err(ErrorKind::NoSuchCache.into()),
         }
     } else {
         // Perform hard deletion
-        let deletion = Cache::delete_many()
-            .filter(cache::Column::Id.eq(cache.id))
-            .filter(cache::Column::DeletedAt.is_null()) // don't operate on soft-deleted caches
-            .exec(database)
-            .await
-            .map_err(ServerError::database_error)?;
-
-        if deletion.rows_affected == 0 {
-            // Someone raced to (soft) delete the cache before us
-            Err(ErrorKind::NoSuchCache.into())
-        } else {
-            Ok(())
+        let deleted = queries::hard_delete_cache(database, cache.id).await;
+        match deleted {
+            Ok(()) => Ok(()),
+            Err(_) => Err(ErrorKind::NoSuchCache.into()),
         }
     }
 }
@@ -202,24 +191,19 @@ pub(crate) async fn create_cache(
         KeypairConfig::Keypair(k) => k,
     };
 
-    let num_inserted = Cache::insert(cache::ActiveModel {
-        name: Set(cache_name.to_string()),
-        keypair: Set(keypair.export_keypair()),
-        is_public: Set(payload.is_public),
-        store_dir: Set(payload.store_dir),
-        priority: Set(payload.priority),
-        upstream_cache_key_names: Set(DbJson(payload.upstream_cache_key_names)),
-        created_at: Set(Utc::now()),
-        ..Default::default()
-    })
-    .on_conflict(
-        OnConflict::column(cache::Column::Name)
-            .do_nothing()
-            .to_owned(),
+    let upstream_json = serde_json::to_string(&payload.upstream_cache_key_names)
+        .map_err(|e| ErrorKind::RequestError(e.into()))?;
+
+    let num_inserted = queries::insert_cache(
+        database,
+        cache_name.as_str(),
+        &keypair.export_keypair(),
+        payload.is_public,
+        &payload.store_dir,
+        payload.priority,
+        &upstream_json,
     )
-    .exec_without_returning(database)
-    .await
-    .map_err(ServerError::database_error)?;
+    .await?;
 
     if num_inserted == 0 {
         // The cache already exists

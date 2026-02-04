@@ -1,13 +1,16 @@
 //! HTTP middlewares for access control.
 
+use std::sync::Arc;
+
 use attic::cache::CacheName;
 use attic_token::util::parse_authorization_header;
 use axum::{extract::Request, middleware::Next, response::Response};
-use sea_orm::DatabaseConnection;
 use tokio::sync::OnceCell;
 
 use crate::access::{CachePermission, Token};
-use crate::database::{entity::cache::CacheModel, AtticDatabase};
+use crate::database::connection::TursoConnection;
+use crate::database::models::CacheModel;
+use crate::database::AtticDatabase;
 use crate::error::ServerResult;
 use crate::{RequestState, State};
 
@@ -36,7 +39,7 @@ impl AuthState {
     /// Finds and performs authorization for a cache.
     pub async fn auth_cache<F, T>(
         &self,
-        database: &DatabaseConnection,
+        database: &Arc<TursoConnection>,
         cache_name: &CacheName,
         f: F,
     ) -> ServerResult<T>

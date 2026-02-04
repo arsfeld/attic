@@ -6,28 +6,13 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use futures::future::join_all;
-use sea_orm::entity::prelude::*;
-use sea_orm::query::QuerySelect;
-use sea_orm::sea_query::{LockBehavior, LockType, Query};
-use sea_orm::{ConnectionTrait, FromQueryResult};
 use tokio::sync::Semaphore;
 use tokio::time;
 use tracing::instrument;
 
 use super::{State, StateInner};
 use crate::config::Config;
-use crate::database::entity::cache::{self, Entity as Cache};
-use crate::database::entity::chunk::{self, ChunkState, Entity as Chunk};
-use crate::database::entity::chunkref::{self, Entity as ChunkRef};
-use crate::database::entity::nar::{self, Entity as Nar, NarState};
-use crate::database::entity::object::{self, Entity as Object};
-
-#[derive(Debug, FromQueryResult)]
-struct CacheIdAndRetentionPeriod {
-    id: i64,
-    name: String,
-    retention_period: i32,
-}
+use crate::database::queries;
 
 /// Runs garbage collection periodically.
 pub async fn run_garbage_collection(config: Config) {
@@ -67,26 +52,17 @@ async fn run_time_based_garbage_collection(state: &State) -> Result<()> {
     let now = Utc::now();
 
     let default_retention_period = state.config.garbage_collection.default_retention_period;
-    let retention_period =
-        cache::Column::RetentionPeriod.if_null(default_retention_period.as_secs() as i32);
+    let default_retention_seconds = default_retention_period.as_secs() as i64;
 
     // Find caches with retention periods set
-    let caches = Cache::find()
-        .select_only()
-        .column(cache::Column::Id)
-        .column(cache::Column::Name)
-        .column_as(retention_period.clone(), "retention_period")
-        .filter(retention_period.ne(0))
-        .into_model::<CacheIdAndRetentionPeriod>()
-        .all(db)
-        .await?;
+    let caches = queries::find_caches_with_retention(db, default_retention_seconds).await?;
 
     tracing::info!(
         "Found {} caches subject to time-based garbage collection",
         caches.len()
     );
 
-    let mut objects_deleted = 0;
+    let mut objects_deleted = 0u64;
 
     for cache in caches {
         let period = ChronoDuration::seconds(cache.retention_period.into());
@@ -97,24 +73,17 @@ async fn run_time_based_garbage_collection(state: &State) -> Result<()> {
             )
         })?;
 
-        let deletion = Object::delete_many()
-            .filter(object::Column::CacheId.eq(cache.id))
-            .filter(object::Column::CreatedAt.lt(cutoff))
-            .filter(
-                object::Column::LastAccessedAt
-                    .is_null()
-                    .or(object::Column::LastAccessedAt.lt(cutoff)),
-            )
-            .exec(db)
-            .await?;
+        let cutoff_str = cutoff.to_rfc3339();
+        let deleted =
+            queries::delete_objects_by_cache_and_cutoff(db, cache.id, &cutoff_str).await?;
 
         tracing::info!(
             "Deleted {} objects from {} (ID {})",
-            deletion.rows_affected,
+            deleted,
             cache.name,
             cache.id
         );
-        objects_deleted += deletion.rows_affected;
+        objects_deleted += deleted;
     }
 
     tracing::info!("Deleted {} objects in total", objects_deleted);
@@ -126,29 +95,18 @@ async fn run_time_based_garbage_collection(state: &State) -> Result<()> {
 async fn run_reap_orphan_nars(state: &State) -> Result<()> {
     let db = state.database().await?;
 
-    // find all orphan NARs...
-    let orphan_nar_ids = Query::select()
-        .from(Nar)
-        .expr(nar::Column::Id.into_expr())
-        .left_join(
-            Object,
-            object::Column::NarId
-                .into_expr()
-                .eq(nar::Column::Id.into_expr()),
-        )
-        .and_where(object::Column::Id.is_null())
-        .and_where(nar::Column::State.eq(NarState::Valid))
-        .and_where(nar::Column::HoldersCount.eq(0))
-        .lock_with_tables_behavior(LockType::Update, [Nar], LockBehavior::SkipLocked)
-        .to_owned();
+    // Find all orphan NARs
+    let orphan_nar_ids = queries::find_orphan_nar_ids(db).await?;
 
-    // ... and simply delete them
-    let deletion = Nar::delete_many()
-        .filter(nar::Column::Id.in_subquery(orphan_nar_ids))
-        .exec(db)
-        .await?;
+    if orphan_nar_ids.is_empty() {
+        tracing::info!("No orphan NARs found");
+        return Ok(());
+    }
 
-    tracing::info!("Deleted {} orphan NARs", deletion.rows_affected,);
+    // Delete them
+    let deleted = queries::delete_nars_by_ids(db, &orphan_nar_ids).await?;
+
+    tracing::info!("Deleted {} orphan NARs", deleted);
 
     Ok(())
 }
@@ -158,50 +116,23 @@ async fn run_reap_orphan_chunks(state: &State) -> Result<()> {
     let db = state.database().await?;
     let storage = state.storage().await?;
 
-    let orphan_chunk_limit = match db.get_database_backend() {
-        // Arbitrarily chosen sensible value since there's no good default to choose from for MySQL
-        sea_orm::DatabaseBackend::MySql => 1000,
-        // Panic limit set by sqlx for postgresql: https://github.com/launchbadge/sqlx/issues/671#issuecomment-687043510
-        sea_orm::DatabaseBackend::Postgres => u64::from(u16::MAX),
-        // Default statement limit imposed by sqlite: https://www.sqlite.org/limits.html#max_variable_number
-        sea_orm::DatabaseBackend::Sqlite => 500,
-    };
+    // SQLite default limit
+    let orphan_chunk_limit: u64 = 500;
 
-    // find all orphan chunks...
-    let orphan_chunk_ids = Query::select()
-        .from(Chunk)
-        .expr(chunk::Column::Id.into_expr())
-        .left_join(
-            ChunkRef,
-            chunkref::Column::ChunkId
-                .into_expr()
-                .eq(chunk::Column::Id.into_expr()),
-        )
-        .and_where(chunkref::Column::Id.is_null())
-        .and_where(chunk::Column::State.eq(ChunkState::Valid))
-        .and_where(chunk::Column::HoldersCount.eq(0))
-        .lock_with_tables_behavior(LockType::Update, [Chunk], LockBehavior::SkipLocked)
-        .to_owned();
+    // Find all orphan chunks
+    let orphan_chunk_ids = queries::find_orphan_chunk_ids(db).await?;
 
-    // ... and transition their state to Deleted
-    //
-    // Deleted chunks are essentially invisible from our normal queries
-    let transition_statement = {
-        let change_state = Query::update()
-            .table(Chunk)
-            .value(chunk::Column::State, ChunkState::Deleted)
-            .and_where(chunk::Column::Id.in_subquery(orphan_chunk_ids))
-            .to_owned();
-        db.get_database_backend().build(&change_state)
-    };
+    if orphan_chunk_ids.is_empty() {
+        tracing::info!("No orphan chunks found");
+        return Ok(());
+    }
 
-    db.execute(transition_statement).await?;
+    // Transition their state to Deleted
+    let transitioned = queries::transition_chunks_to_deleted(db, &orphan_chunk_ids).await?;
+    tracing::debug!("Transitioned {} chunks to Deleted state", transitioned);
 
-    let orphan_chunks: Vec<chunk::Model> = Chunk::find()
-        .filter(chunk::Column::State.eq(ChunkState::Deleted))
-        .limit(orphan_chunk_limit)
-        .all(db)
-        .await?;
+    // Find chunks in Deleted state
+    let orphan_chunks = queries::find_deleted_chunks(db, orphan_chunk_limit).await?;
 
     if orphan_chunks.is_empty() {
         return Ok(());
@@ -213,6 +144,7 @@ async fn run_reap_orphan_chunks(state: &State) -> Result<()> {
         .into_iter()
         .map(|chunk| {
             let delete_limit = delete_limit.clone();
+            let storage = storage.clone();
             async move {
                 let permit = delete_limit.acquire().await?;
                 storage.delete_file_db(&chunk.remote_file.0).await?;
@@ -242,12 +174,9 @@ async fn run_reap_orphan_chunks(state: &State) -> Result<()> {
         .collect();
 
     // Finally, delete them from the database
-    let deletion = Chunk::delete_many()
-        .filter(chunk::Column::Id.is_in(deleted_chunk_ids))
-        .exec(db)
-        .await?;
+    let deleted = queries::delete_chunks_by_ids(db, &deleted_chunk_ids).await?;
 
-    tracing::info!("Deleted {} orphan chunks", deletion.rows_affected);
+    tracing::info!("Deleted {} orphan chunks", deleted);
 
     Ok(())
 }

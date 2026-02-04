@@ -1,22 +1,13 @@
 use std::collections::HashSet;
 
 use axum::extract::{Extension, Json};
-use sea_orm::entity::prelude::*;
-use sea_orm::{FromQueryResult, QuerySelect};
 use tracing::instrument;
 
-use crate::database::entity::cache;
-use crate::database::entity::nar;
-use crate::database::entity::object::{self, Entity as Object};
-use crate::error::{ServerError, ServerResult};
+use crate::database::queries;
+use crate::error::ServerResult;
 use crate::{RequestState, State};
 use attic::api::v1::get_missing_paths::{GetMissingPathsRequest, GetMissingPathsResponse};
 use attic::nix_store::StorePathHash;
-
-#[derive(FromQueryResult)]
-struct StorePathHashOnly {
-    store_path_hash: String,
-}
 
 /// Gets information on missing paths in a cache.
 ///
@@ -43,22 +34,16 @@ pub(crate) async fn get_missing_paths(
         .map(|h| h.as_str().to_owned())
         .collect();
 
-    let query_in = requested_hashes.iter().map(|h| Value::from(h.to_owned()));
+    let requested_hashes_vec: Vec<String> = requested_hashes.iter().cloned().collect();
 
-    let result: Vec<StorePathHashOnly> = Object::find()
-        .select_only()
-        .column_as(object::Column::StorePathHash, "store_path_hash")
-        .join(sea_orm::JoinType::InnerJoin, object::Relation::Cache.def())
-        .join(sea_orm::JoinType::InnerJoin, object::Relation::Nar.def())
-        .filter(cache::Column::Name.eq(payload.cache.as_str()))
-        .filter(object::Column::StorePathHash.is_in(query_in))
-        .filter(nar::Column::CompletenessHint.eq(true))
-        .into_model::<StorePathHashOnly>()
-        .all(database)
-        .await
-        .map_err(ServerError::database_error)?;
-
-    let found_hashes: HashSet<String> = result.into_iter().map(|row| row.store_path_hash).collect();
+    let found_hashes: HashSet<String> = queries::find_objects_by_store_path_hashes(
+        database,
+        payload.cache.as_str(),
+        &requested_hashes_vec,
+    )
+    .await?
+    .into_iter()
+    .collect();
 
     // Safety: All requested_hashes are validated `StorePathHash`es.
     // No need to pay the cost of checking again

@@ -151,8 +151,7 @@ let
   # Server-only package with Turso/libSQL support.
   #
   # This build uses the `turso` feature flag which provides libSQL (Turso) database
-  # support. It cannot be combined with the default `seaorm` feature due to
-  # duplicate SQLite symbols from libsql.
+  # support with embedded replicas for low-latency reads.
   attic-server-turso = craneLib.buildPackage ({
     pname = "attic-server-turso";
 
@@ -163,7 +162,7 @@ let
     # See comment in `attic-tests`
     doCheck = false;
 
-    cargoExtraArgs = "-p attic-server --no-default-features --features turso";
+    cargoExtraArgs = "-p attic-server --features turso";
 
     CARGO_PROFILE_RELEASE_LTO = "fat";
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "1";

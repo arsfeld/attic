@@ -1,7 +1,6 @@
-//! Model definitions for Turso database backend.
+//! Model definitions for the libSQL database backend.
 //!
-//! These models are designed to work without SeaORM derives, using manual
-//! parsing from libsql::Row values.
+//! These models use manual parsing from libsql::Row values.
 
 use std::path::PathBuf;
 use std::str::FromStr;

@@ -13,13 +13,8 @@ use axum::{
     http::HeaderMap,
 };
 use bytes::{Bytes, BytesMut};
-use chrono::Utc;
 use futures::future::join_all;
 use futures::StreamExt;
-use sea_orm::entity::prelude::*;
-use sea_orm::sea_query::Expr;
-use sea_orm::ActiveValue::Set;
-use sea_orm::{QuerySelect, TransactionTrait};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufRead, AsyncReadExt};
 use tokio::sync::Semaphore;
@@ -42,13 +37,9 @@ use attic::hash::Hash;
 use attic::io::{read_chunk_async, HashReader};
 use attic::util::Finally;
 
-use crate::database::entity::cache;
-use crate::database::entity::chunk::{self, ChunkState, Entity as Chunk};
-use crate::database::entity::chunkref::{self, Entity as ChunkRef};
-use crate::database::entity::nar::{self, Entity as Nar, NarState};
-use crate::database::entity::object::{self, Entity as Object, InsertExt};
-use crate::database::entity::Json as DbJson;
-use crate::database::{AtticDatabase, ChunkGuard, NarGuard};
+use crate::database::connection::TursoConnection;
+use crate::database::models::{CacheModel, ChunkModel, ChunkState, NarState};
+use crate::database::{queries, AtticDatabase, ChunkGuard, TursoDbError};
 
 /// Number of chunks to upload to the storage backend at once.
 ///
@@ -68,10 +59,6 @@ enum ChunkData {
 struct UploadChunkResult {
     guard: ChunkGuard,
     deduplicated: bool,
-}
-
-trait UploadPathNarInfoExt {
-    fn to_active_model(&self) -> object::ActiveModel;
 }
 
 /// Uploads a new object to the cache.
@@ -153,13 +140,7 @@ pub(crate) async fn upload_path(
     // Try to acquire a lock on an existing NAR
     if let Some(existing_nar) = database.find_and_lock_nar(&upload_info.nar_hash).await? {
         // Deduplicate?
-        let missing_chunk = ChunkRef::find()
-            .filter(chunkref::Column::NarId.eq(existing_nar.id))
-            .filter(chunkref::Column::ChunkId.is_null())
-            .limit(1)
-            .one(database)
-            .await
-            .map_err(ServerError::database_error)?;
+        let missing_chunk = queries::find_chunkref_missing_chunk(database, existing_nar.id).await?;
 
         if missing_chunk.is_none() {
             // Can actually be deduplicated
@@ -183,12 +164,12 @@ pub(crate) async fn upload_path(
 /// Uploads a path when there is already a matching NAR in the global cache.
 async fn upload_path_dedup(
     username: Option<String>,
-    cache: cache::Model,
+    cache: CacheModel,
     upload_info: UploadPathNarInfo,
     stream: impl AsyncBufRead + Unpin,
-    database: &DatabaseConnection,
+    database: &Arc<TursoConnection>,
     state: &State,
-    existing_nar: NarGuard,
+    existing_nar: crate::database::NarGuard,
 ) -> ServerResult<Json<UploadPathResult>> {
     if state.config.require_proof_of_possession {
         let (mut stream, nar_compute) = HashReader::new(stream, Sha256::new());
@@ -209,42 +190,53 @@ async fn upload_path_dedup(
         }
     }
 
-    // Finally...
-    let txn = database
-        .begin()
+    // Begin transaction
+    database
+        .begin_transaction()
         .await
-        .map_err(ServerError::database_error)?;
+        .map_err(|e| ServerError::database_error(TursoDbError(e.to_string())))?;
 
-    // Create a mapping granting the local cache access to the NAR
-    Object::insert({
-        let mut new_object = upload_info.to_active_model();
-        new_object.cache_id = Set(cache.id);
-        new_object.nar_id = Set(existing_nar.id);
-        new_object.created_at = Set(Utc::now());
-        new_object.created_by = Set(username);
-        new_object
-    })
-    .on_conflict_do_update()
-    .exec(&txn)
-    .await
-    .map_err(ServerError::database_error)?;
+    let result = async {
+        // Create a mapping granting the local cache access to the NAR
+        let references_json =
+            serde_json::to_string(&upload_info.references).map_err(ServerError::request_error)?;
+        let sigs_json =
+            serde_json::to_string(&upload_info.sigs).map_err(ServerError::request_error)?;
 
-    // Also mark the NAR as complete again
-    //
-    // This is racy (a chunkref might have been broken in the
-    // meantime), but it's okay since it's just a hint to
-    // `get-missing-paths` so clients don't attempt to upload
-    // again. Also see the comments in `server/src/database/entity/nar.rs`.
-    Nar::update(nar::ActiveModel {
-        id: Set(existing_nar.id),
-        completeness_hint: Set(true),
-        ..Default::default()
-    })
-    .exec(&txn)
-    .await
-    .map_err(ServerError::database_error)?;
+        queries::insert_object_upsert(
+            database,
+            cache.id,
+            existing_nar.id,
+            &upload_info.store_path_hash.to_string(),
+            &upload_info.store_path,
+            &references_json,
+            None, // system
+            upload_info.deriver.as_deref(),
+            &sigs_json,
+            upload_info.ca.as_deref(),
+            username.as_deref(),
+        )
+        .await?;
 
-    txn.commit().await.map_err(ServerError::database_error)?;
+        // Also mark the NAR as complete again
+        queries::update_nar_completeness_hint(database, existing_nar.id, true).await?;
+
+        Ok::<(), ServerError>(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => {
+            database
+                .commit()
+                .await
+                .map_err(|e| ServerError::database_error(TursoDbError(e.to_string())))?;
+        }
+        Err(e) => {
+            let _ = database.rollback().await;
+            return Err(e);
+        }
+    }
 
     // Ensure it's not unlocked earlier
     drop(existing_nar);
@@ -263,10 +255,10 @@ async fn upload_path_dedup(
 /// in a background process.
 async fn upload_path_new(
     username: Option<String>,
-    cache: cache::Model,
+    cache: CacheModel,
     upload_info: UploadPathNarInfo,
     stream: impl AsyncBufRead + Send + Unpin + 'static,
-    database: &DatabaseConnection,
+    database: &Arc<TursoConnection>,
     state: &State,
 ) -> ServerResult<Json<UploadPathResult>> {
     let nar_size_threshold = state.config.chunking.nar_size_threshold;
@@ -281,10 +273,10 @@ async fn upload_path_new(
 /// Uploads a path when there is no matching NAR in the global cache (chunked).
 async fn upload_path_new_chunked(
     username: Option<String>,
-    cache: cache::Model,
+    cache: CacheModel,
     upload_info: UploadPathNarInfo,
     stream: impl AsyncBufRead + Send + Unpin + 'static,
-    database: &DatabaseConnection,
+    database: &Arc<TursoConnection>,
     state: &State,
 ) -> ServerResult<Json<UploadPathResult>> {
     let chunking_config = &state.config.chunking;
@@ -296,39 +288,24 @@ async fn upload_path_new_chunked(
     let nar_size_db = i64::try_from(upload_info.nar_size).map_err(ServerError::request_error)?;
 
     // Create a pending NAR entry
-    let nar_id = {
-        let model = nar::ActiveModel {
-            state: Set(NarState::PendingUpload),
-            compression: Set(compression.to_string()),
-
-            nar_hash: Set(upload_info.nar_hash.to_typed_base16()),
-            nar_size: Set(nar_size_db),
-
-            num_chunks: Set(0),
-
-            created_at: Set(Utc::now()),
-            ..Default::default()
-        };
-
-        let insertion = Nar::insert(model)
-            .exec(database)
-            .await
-            .map_err(ServerError::database_error)?;
-
-        insertion.last_insert_id
-    };
+    let nar = queries::insert_nar(
+        database,
+        NarState::PendingUpload,
+        &upload_info.nar_hash.to_typed_base16(),
+        nar_size_db,
+        compression.as_str(),
+        0,
+    )
+    .await?;
+    let nar_id = nar.id;
 
     let cleanup = Finally::new({
         let database = database.clone();
-        let nar_model = nar::ActiveModel {
-            id: Set(nar_id),
-            ..Default::default()
-        };
 
         async move {
             tracing::warn!("Error occurred - Cleaning up NAR entry");
 
-            if let Err(e) = Nar::delete(nar_model).exec(&database).await {
+            if let Err(e) = queries::delete_nar(&database, nar_id).await {
                 tracing::warn!("Failed to unregister failed NAR: {}", e);
             }
         }
@@ -373,17 +350,15 @@ async fn upload_path_new_chunked(
                 .await?;
 
                 // Create mapping from the NAR to the chunk
-                ChunkRef::insert(chunkref::ActiveModel {
-                    nar_id: Set(nar_id),
-                    seq: Set(chunk_idx),
-                    chunk_id: Set(Some(chunk.guard.id)),
-                    chunk_hash: Set(chunk.guard.chunk_hash.clone()),
-                    compression: Set(chunk.guard.compression.clone()),
-                    ..Default::default()
-                })
-                .exec(&database)
-                .await
-                .map_err(ServerError::database_error)?;
+                queries::insert_chunkref(
+                    &database,
+                    nar_id,
+                    chunk_idx,
+                    Some(chunk.guard.id),
+                    &chunk.guard.chunk_hash,
+                    &chunk.guard.compression,
+                )
+                .await?;
 
                 drop(permit);
                 Ok(chunk)
@@ -423,38 +398,60 @@ async fn upload_path_new_chunked(
                 )
             });
 
-    // Finally...
-    let txn = database
-        .begin()
+    // Begin transaction for final updates
+    database
+        .begin_transaction()
         .await
-        .map_err(ServerError::database_error)?;
+        .map_err(|e| ServerError::database_error(TursoDbError(e.to_string())))?;
 
-    // Set num_chunks and mark the NAR as Valid
-    Nar::update(nar::ActiveModel {
-        id: Set(nar_id),
-        state: Set(NarState::Valid),
-        num_chunks: Set(chunks.len() as i32),
-        ..Default::default()
-    })
-    .exec(&txn)
-    .await
-    .map_err(ServerError::database_error)?;
+    let result = async {
+        // Set num_chunks and mark the NAR as Valid
+        queries::update_nar(
+            database,
+            nar_id,
+            Some(NarState::Valid),
+            Some(chunks.len() as i32),
+            None,
+        )
+        .await?;
 
-    // Create a mapping granting the local cache access to the NAR
-    Object::insert({
-        let mut new_object = upload_info.to_active_model();
-        new_object.cache_id = Set(cache.id);
-        new_object.nar_id = Set(nar_id);
-        new_object.created_at = Set(Utc::now());
-        new_object.created_by = Set(username);
-        new_object
-    })
-    .on_conflict_do_update()
-    .exec(&txn)
-    .await
-    .map_err(ServerError::database_error)?;
+        // Create a mapping granting the local cache access to the NAR
+        let references_json =
+            serde_json::to_string(&upload_info.references).map_err(ServerError::request_error)?;
+        let sigs_json =
+            serde_json::to_string(&upload_info.sigs).map_err(ServerError::request_error)?;
 
-    txn.commit().await.map_err(ServerError::database_error)?;
+        queries::insert_object_upsert(
+            database,
+            cache.id,
+            nar_id,
+            &upload_info.store_path_hash.to_string(),
+            &upload_info.store_path,
+            &references_json,
+            None, // system
+            upload_info.deriver.as_deref(),
+            &sigs_json,
+            upload_info.ca.as_deref(),
+            username.as_deref(),
+        )
+        .await?;
+
+        Ok::<(), ServerError>(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => {
+            database
+                .commit()
+                .await
+                .map_err(|e| ServerError::database_error(TursoDbError(e.to_string())))?;
+        }
+        Err(e) => {
+            let _ = database.rollback().await;
+            return Err(e);
+        }
+    }
 
     cleanup.cancel();
 
@@ -472,10 +469,10 @@ async fn upload_path_new_chunked(
 /// We upload the entire NAR as a single chunk.
 async fn upload_path_new_unchunked(
     username: Option<String>,
-    cache: cache::Model,
+    cache: CacheModel,
     upload_info: UploadPathNarInfo,
     stream: impl AsyncBufRead + Send + Unpin + 'static,
-    database: &DatabaseConnection,
+    database: &Arc<TursoConnection>,
     state: &State,
 ) -> ServerResult<Json<UploadPathResult>> {
     let compression_config = &state.config.compression;
@@ -500,63 +497,73 @@ async fn upload_path_new_unchunked(
     .await?;
     let file_size = chunk.guard.file_size.unwrap() as usize;
 
-    // Finally...
-    let txn = database
-        .begin()
+    // Begin transaction
+    database
+        .begin_transaction()
         .await
-        .map_err(ServerError::database_error)?;
+        .map_err(|e| ServerError::database_error(TursoDbError(e.to_string())))?;
 
-    // Create a NAR entry
-    let nar_id = {
-        let model = nar::ActiveModel {
-            state: Set(NarState::Valid),
-            compression: Set(compression.to_string()),
+    let result = async {
+        // Create a NAR entry
+        let nar = queries::insert_nar(
+            database,
+            NarState::Valid,
+            &upload_info.nar_hash.to_typed_base16(),
+            chunk.guard.chunk_size,
+            compression.as_str(),
+            1,
+        )
+        .await?;
+        let nar_id = nar.id;
 
-            nar_hash: Set(upload_info.nar_hash.to_typed_base16()),
-            nar_size: Set(chunk.guard.chunk_size),
+        // Create a mapping from the NAR to the chunk
+        queries::insert_chunkref(
+            database,
+            nar_id,
+            0,
+            Some(chunk.guard.id),
+            &upload_info.nar_hash.to_typed_base16(),
+            compression.as_str(),
+        )
+        .await?;
 
-            num_chunks: Set(1),
+        // Create a mapping granting the local cache access to the NAR
+        let references_json =
+            serde_json::to_string(&upload_info.references).map_err(ServerError::request_error)?;
+        let sigs_json =
+            serde_json::to_string(&upload_info.sigs).map_err(ServerError::request_error)?;
 
-            created_at: Set(Utc::now()),
-            ..Default::default()
-        };
+        queries::insert_object_upsert(
+            database,
+            cache.id,
+            nar_id,
+            &upload_info.store_path_hash.to_string(),
+            &upload_info.store_path,
+            &references_json,
+            None, // system
+            upload_info.deriver.as_deref(),
+            &sigs_json,
+            upload_info.ca.as_deref(),
+            username.as_deref(),
+        )
+        .await?;
 
-        let insertion = Nar::insert(model)
-            .exec(&txn)
-            .await
-            .map_err(ServerError::database_error)?;
+        Ok::<(), ServerError>(())
+    }
+    .await;
 
-        insertion.last_insert_id
-    };
-
-    // Create a mapping from the NAR to the chunk
-    ChunkRef::insert(chunkref::ActiveModel {
-        nar_id: Set(nar_id),
-        seq: Set(0),
-        chunk_id: Set(Some(chunk.guard.id)),
-        chunk_hash: Set(upload_info.nar_hash.to_typed_base16()),
-        compression: Set(compression.to_string()),
-        ..Default::default()
-    })
-    .exec(&txn)
-    .await
-    .map_err(ServerError::database_error)?;
-
-    // Create a mapping granting the local cache access to the NAR
-    Object::insert({
-        let mut new_object = upload_info.to_active_model();
-        new_object.cache_id = Set(cache.id);
-        new_object.nar_id = Set(nar_id);
-        new_object.created_at = Set(Utc::now());
-        new_object.created_by = Set(username);
-        new_object
-    })
-    .on_conflict_do_update()
-    .exec(&txn)
-    .await
-    .map_err(ServerError::database_error)?;
-
-    txn.commit().await.map_err(ServerError::database_error)?;
+    match result {
+        Ok(()) => {
+            database
+                .commit()
+                .await
+                .map_err(|e| ServerError::database_error(TursoDbError(e.to_string())))?;
+        }
+        Err(e) => {
+            let _ = database.rollback().await;
+            return Err(e);
+        }
+    }
 
     Ok(Json(UploadPathResult {
         kind: UploadPathResultKind::Uploaded,
@@ -572,7 +579,7 @@ async fn upload_chunk(
     data: ChunkData,
     compression_type: CompressionType,
     compression_level: CompressionLevel,
-    database: DatabaseConnection,
+    database: Arc<TursoConnection>,
     state: State,
     require_proof_of_possession: bool,
 ) -> ServerResult<UploadChunkResult> {
@@ -618,39 +625,24 @@ async fn upload_chunk(
     let backend = state.storage().await?;
     let remote_file = backend.make_db_reference(key.clone()).await?;
     let remote_file_id = remote_file.remote_file_id();
+    let remote_file_json = serde_json::to_string(&remote_file).map_err(ServerError::request_error)?;
 
     let chunk_size_db = i64::try_from(given_chunk_size).map_err(ServerError::request_error)?;
 
-    let chunk_id = {
-        let model = chunk::ActiveModel {
-            state: Set(ChunkState::PendingUpload),
-            compression: Set(compression.to_string()),
-
-            // Untrusted data - To be confirmed later
-            chunk_hash: Set(given_chunk_hash.to_typed_base16()),
-            chunk_size: Set(chunk_size_db),
-
-            remote_file: Set(DbJson(remote_file)),
-            remote_file_id: Set(remote_file_id),
-
-            created_at: Set(Utc::now()),
-            ..Default::default()
-        };
-
-        let insertion = Chunk::insert(model)
-            .exec(&database)
-            .await
-            .map_err(ServerError::database_error)?;
-
-        insertion.last_insert_id
-    };
+    let chunk = queries::insert_chunk(
+        &database,
+        ChunkState::PendingUpload,
+        &given_chunk_hash.to_typed_base16(),
+        chunk_size_db,
+        compression.as_str(),
+        &remote_file_json,
+        &remote_file_id,
+    )
+    .await?;
+    let chunk_id = chunk.id;
 
     let cleanup = Finally::new({
         let database = database.clone();
-        let chunk_model = chunk::ActiveModel {
-            id: Set(chunk_id),
-            ..Default::default()
-        };
         let backend = backend.clone();
         let key = key.clone();
 
@@ -661,7 +653,7 @@ async fn upload_chunk(
                 tracing::warn!("Failed to clean up failed upload: {}", e);
             }
 
-            if let Err(e) = Chunk::delete(chunk_model).exec(&database).await {
+            if let Err(e) = queries::delete_chunk(&database, chunk_id).await {
                 tracing::warn!("Failed to unregister failed chunk: {}", e);
             }
         }
@@ -687,48 +679,61 @@ async fn upload_chunk(
         return Err(ErrorKind::RequestError(anyhow!("Bad chunk hash or size")).into());
     }
 
-    // Finally...
-    let txn = database
-        .begin()
+    // Begin transaction
+    database
+        .begin_transaction()
         .await
-        .map_err(ServerError::database_error)?;
+        .map_err(|e| ServerError::database_error(TursoDbError(e.to_string())))?;
 
-    // Update the file hash and size, and set the chunk to valid
-    let file_size_db = i64::try_from(*file_size).map_err(ServerError::request_error)?;
-    let chunk = Chunk::update(chunk::ActiveModel {
-        id: Set(chunk_id),
-        state: Set(ChunkState::Valid),
-        file_hash: Set(Some(file_hash.to_typed_base16())),
-        file_size: Set(Some(file_size_db)),
-        holders_count: Set(1),
-        ..Default::default()
-    })
-    .exec(&txn)
-    .await
-    .map_err(ServerError::database_error)?;
+    let result = async {
+        // Update the file hash and size, and set the chunk to valid
+        let file_size_db = i64::try_from(*file_size).map_err(ServerError::request_error)?;
+        let updated_chunk = queries::update_chunk(
+            &database,
+            chunk_id,
+            Some(ChunkState::Valid),
+            Some(&file_hash.to_typed_base16()),
+            Some(file_size_db),
+            Some(1), // holders_count
+        )
+        .await?;
 
-    // Also repair broken chunk references pointing at the same chunk
-    let repaired = ChunkRef::update_many()
-        .col_expr(chunkref::Column::ChunkId, Expr::value(chunk_id))
-        .filter(chunkref::Column::ChunkId.is_null())
-        .filter(chunkref::Column::ChunkHash.eq(chunk_hash.to_typed_base16()))
-        .filter(chunkref::Column::Compression.eq(compression.to_string()))
-        .exec(&txn)
-        .await
-        .map_err(ServerError::database_error)?;
+        // Also repair broken chunk references pointing at the same chunk
+        let repaired = queries::update_many_chunkrefs_by_hash(
+            &database,
+            chunk_id,
+            &chunk_hash.to_typed_base16(),
+            compression.as_str(),
+        )
+        .await?;
 
-    txn.commit().await.map_err(ServerError::database_error)?;
+        tracing::debug!("Repaired {} chunkrefs", repaired);
 
-    cleanup.cancel();
+        Ok::<ChunkModel, ServerError>(updated_chunk)
+    }
+    .await;
 
-    tracing::debug!("Repaired {} chunkrefs", repaired.rows_affected);
+    match result {
+        Ok(chunk) => {
+            database
+                .commit()
+                .await
+                .map_err(|e| ServerError::database_error(TursoDbError(e.to_string())))?;
 
-    let guard = ChunkGuard::from_locked(database.clone(), chunk);
+            cleanup.cancel();
 
-    Ok(UploadChunkResult {
-        guard,
-        deduplicated: false,
-    })
+            let guard = ChunkGuard::from_locked(database.clone(), chunk);
+
+            Ok(UploadChunkResult {
+                guard,
+                deduplicated: false,
+            })
+        }
+        Err(e) => {
+            let _ = database.rollback().await;
+            Err(e)
+        }
+    }
 }
 
 /// Returns a compressor function that takes some stream as input.
@@ -778,20 +783,6 @@ impl ChunkData {
         match self {
             Self::Bytes(bytes) => Box::new(Cursor::new(bytes)),
             Self::Stream(stream, _, _) => stream,
-        }
-    }
-}
-
-impl UploadPathNarInfoExt for UploadPathNarInfo {
-    fn to_active_model(&self) -> object::ActiveModel {
-        object::ActiveModel {
-            store_path_hash: Set(self.store_path_hash.to_string()),
-            store_path: Set(self.store_path.clone()),
-            references: Set(DbJson(self.references.clone())),
-            deriver: Set(self.deriver.clone()),
-            sigs: Set(DbJson(self.sigs.clone())),
-            ca: Set(self.ca.clone()),
-            ..Default::default()
         }
     }
 }
