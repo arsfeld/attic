@@ -44,6 +44,7 @@ push_digest() {
 		--arg image_name "${image_name}"
 }
 
+# Build and push standard server image
 >>"${manifest_spec}" emit_header
 
 nix build .#attic-server-image .#attic-server-image-aarch64 -L --print-out-paths | \
@@ -52,9 +53,52 @@ while read -r output; do
 done
 
 >&2 echo "----------"
->&2 echo "Generated manifest-tool spec:"
+>&2 echo "Generated manifest-tool spec (standard):"
 >&2 echo "----------"
 cat "${manifest_spec}"
 >&2 echo "----------"
 
 manifest-tool push from-spec "${manifest_spec}"
+
+# Build and push Turso server image
+turso_image_name="${image_name}-turso"
+turso_manifest_spec="$(mktemp -t attic-turso-manifest-spec.XXXXXXXXXX)"
+
+emit_turso_header() {
+	echo "image: ${turso_image_name}"
+	echo "tags:"
+	for tag in "${tags[@]}"; do
+		echo "- ${tag}"
+	done
+	echo "manifests:"
+}
+
+push_turso_digest() {
+	source_image="docker-archive:$1"
+	digest="$(skopeo inspect "${source_image}" | jq -r .Digest)"
+	target_image="docker://${turso_image_name}@${digest}"
+
+	>&2 echo "${source_image} ▸ ${target_image}"
+	>&2 skopeo copy --insecure-policy "${source_image}" "${target_image}"
+
+	echo -n "- "
+	skopeo inspect "${source_image}" | \
+		jq '{platform: {architecture: .Architecture, os: .Os}, image: ($image_name + "@" + .Digest)}' \
+		--arg image_name "${turso_image_name}"
+}
+
+>>"${turso_manifest_spec}" emit_turso_header
+
+nix build .#attic-server-turso-image .#attic-server-turso-image-aarch64 -L --print-out-paths | \
+while read -r output; do
+	>>"${turso_manifest_spec}" push_turso_digest "${output}"
+done
+
+>&2 echo "----------"
+>&2 echo "Generated manifest-tool spec (turso):"
+>&2 echo "----------"
+cat "${turso_manifest_spec}"
+>&2 echo "----------"
+
+manifest-tool push from-spec "${turso_manifest_spec}"
+rm "${turso_manifest_spec}"

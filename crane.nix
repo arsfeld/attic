@@ -148,6 +148,32 @@ let
     };
   } // extraArgs);
 
+  # Server-only package with Turso/libSQL support.
+  #
+  # This build uses the `turso` feature flag which provides libSQL (Turso) database
+  # support. It cannot be combined with the default `seaorm` feature due to
+  # duplicate SQLite symbols from libsql.
+  attic-server-turso = craneLib.buildPackage ({
+    pname = "attic-server-turso";
+
+    # We don't pull in the common cargoArtifacts because the feature flags
+    # and LTO configs are different
+    inherit src version nativeBuildInputs buildInputs;
+
+    # See comment in `attic-tests`
+    doCheck = false;
+
+    cargoExtraArgs = "-p attic-server --no-default-features --features turso";
+
+    CARGO_PROFILE_RELEASE_LTO = "fat";
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "1";
+
+    meta = {
+      description = "Attic server with Turso/libSQL support";
+      mainProgram = "atticd";
+    };
+  } // extraArgs);
+
   # Attic interacts with Nix directly and its tests require trusted-user access
   # to nix-daemon to import NARs, which is not possible in the build sandbox.
   # In the CI pipeline, we build the test executable inside the sandbox, then
@@ -176,5 +202,5 @@ let
     '';
   } // extraArgs);
 in {
-  inherit cargoArtifacts attic attic-client attic-server attic-tests;
+  inherit cargoArtifacts attic attic-client attic-server attic-server-turso attic-tests;
 }
