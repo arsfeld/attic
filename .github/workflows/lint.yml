@@ -18,7 +18,6 @@ jobs:
           command -v brew && brew install bash || true
 
       - uses: DeterminateSystems/nix-installer-action@v18
-        continue-on-error: true # Self-hosted runners already have Nix installed
 
       - uses: DeterminateSystems/magic-nix-cache-action@main
         with:
