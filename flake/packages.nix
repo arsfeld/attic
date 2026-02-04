@@ -80,7 +80,6 @@ in
             attic
             attic-client
             attic-server
-            attic-server-turso
           ;
 
           attic-static = cranePkgsStatic.attic;
@@ -118,26 +117,6 @@ in
               ];
             };
           };
-
-          attic-server-turso-image = pkgs.dockerTools.buildImage {
-            name = "attic-server-turso";
-            tag = "main";
-            copyToRoot = [
-              self'.packages.attic-server-turso
-
-              # Debugging utilities for `fly ssh console`
-              pkgs.busybox
-
-              # Now required by the fly.io sshd
-              pkgs.dockerTools.fakeNss
-            ];
-            config = {
-              Entrypoint = [ "/bin/atticd" ];
-              Env = [
-                "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-              ];
-            };
-          };
         };
       })
 
@@ -149,13 +128,6 @@ in
               pkgs = pkgs.pkgsCross.aarch64-multiplatform;
             };
           in eval.config.packages.attic-server-image;
-
-          attic-server-turso-image-aarch64 = let
-            eval = evalCross {
-              system = "aarch64-linux";
-              pkgs = pkgs.pkgsCross.aarch64-multiplatform;
-            };
-          in eval.config.packages.attic-server-turso-image;
         };
       })
     ]);

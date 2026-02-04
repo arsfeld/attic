@@ -128,6 +128,9 @@ let
   #
   # We don't enable fat LTO in the default `attic` package since it
   # dramatically increases build time.
+  #
+  # This build uses libSQL/Turso as the database backend, supporting both
+  # local SQLite files and remote Turso databases with embedded replicas.
   attic-server = craneLib.buildPackage ({
     pname = "attic-server";
 
@@ -144,31 +147,6 @@ let
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "1";
 
     meta = {
-      mainProgram = "atticd";
-    };
-  } // extraArgs);
-
-  # Server-only package with Turso/libSQL support.
-  #
-  # This build uses the `turso` feature flag which provides libSQL (Turso) database
-  # support with embedded replicas for low-latency reads.
-  attic-server-turso = craneLib.buildPackage ({
-    pname = "attic-server-turso";
-
-    # We don't pull in the common cargoArtifacts because the feature flags
-    # and LTO configs are different
-    inherit src version nativeBuildInputs buildInputs;
-
-    # See comment in `attic-tests`
-    doCheck = false;
-
-    cargoExtraArgs = "-p attic-server --features turso";
-
-    CARGO_PROFILE_RELEASE_LTO = "fat";
-    CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "1";
-
-    meta = {
-      description = "Attic server with Turso/libSQL support";
       mainProgram = "atticd";
     };
   } // extraArgs);
@@ -201,5 +179,5 @@ let
     '';
   } // extraArgs);
 in {
-  inherit cargoArtifacts attic attic-client attic-server attic-server-turso attic-tests;
+  inherit cargoArtifacts attic attic-client attic-server attic-tests;
 }
