@@ -72,7 +72,7 @@ async fn find_object_without_chunks(
     let sql = r#"
         SELECT
             o.id, o.cache_id, o.nar_id, o.store_path_hash, o.store_path,
-            o.references, o.system, o.deriver, o.sigs, o.ca,
+            o."references", o.system, o.deriver, o.sigs, o.ca,
             o.created_at, o.last_accessed_at, o.created_by,
             c.id, c.name, c.keypair, c.is_public, c.store_dir, c.priority,
             c.upstream_cache_key_names, c.created_at, c.deleted_at, c.retention_period,
@@ -120,7 +120,7 @@ async fn find_object_with_chunks(
     let sql = r#"
         SELECT
             o.id, o.cache_id, o.nar_id, o.store_path_hash, o.store_path,
-            o.references, o.system, o.deriver, o.sigs, o.ca,
+            o."references", o.system, o.deriver, o.sigs, o.ca,
             o.created_at, o.last_accessed_at, o.created_by,
             c.id, c.name, c.keypair, c.is_public, c.store_dir, c.priority,
             c.upstream_cache_key_names, c.created_at, c.deleted_at, c.retention_period,
@@ -757,14 +757,15 @@ pub async fn insert_object_upsert(
     let now = Utc::now().to_rfc3339();
 
     // SQLite uses INSERT OR REPLACE or ON CONFLICT syntax
+    // Note: "references" is a SQL reserved keyword and must be quoted
     let sql = r#"
         INSERT INTO object (cache_id, nar_id, store_path_hash, store_path,
-                           references, system, deriver, sigs, ca, created_at, created_by)
+                           "references", system, deriver, sigs, ca, created_at, created_by)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         ON CONFLICT(cache_id, store_path_hash) DO UPDATE SET
             nar_id = excluded.nar_id,
             store_path = excluded.store_path,
-            references = excluded.references,
+            "references" = excluded."references",
             system = excluded.system,
             deriver = excluded.deriver,
             sigs = excluded.sigs,
@@ -1118,4 +1119,810 @@ pub async fn insert_cache(
         .map_err(db_err)?;
 
     Ok(affected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::connection::TursoConfig;
+    use crate::database::migrations::run_migrations;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    /// Helper to create a test database with migrations applied.
+    async fn create_test_db() -> (std::sync::Arc<TursoConnection>, TempDir) {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let db_path = temp_dir.path().join("test.db");
+
+        let config = TursoConfig {
+            url: format!("sqlite://{}", db_path.display()),
+            auth_token: None,
+            local_replica_path: None,
+            sync_interval: Duration::from_secs(60),
+        };
+
+        let conn = TursoConnection::connect(config)
+            .await
+            .expect("Failed to connect");
+
+        run_migrations(&conn).await.expect("Migrations failed");
+
+        (conn, temp_dir)
+    }
+
+    // ==================== Cache Query Tests ====================
+
+    #[tokio::test]
+    async fn test_create_cache() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        let cache = create_cache(
+            &conn,
+            "test-cache",
+            "test-keypair",
+            true,
+            "/nix/store",
+            40,
+            &[],
+        )
+        .await
+        .expect("Create cache failed");
+
+        assert_eq!(cache.name, "test-cache");
+        assert_eq!(cache.keypair, "test-keypair");
+        assert!(cache.is_public);
+        assert_eq!(cache.store_dir, "/nix/store");
+        assert_eq!(cache.priority, 40);
+        assert!(cache.deleted_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_create_cache_with_upstream() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        let upstream = vec!["cache.nixos.org-1".to_string()];
+        let cache = create_cache(
+            &conn,
+            "test-cache",
+            "test-keypair",
+            false,
+            "/nix/store",
+            30,
+            &upstream,
+        )
+        .await
+        .expect("Create cache failed");
+
+        assert!(!cache.is_public);
+        // upstream_cache_key_names is stored as Json<Vec<String>>
+        assert_eq!(cache.upstream_cache_key_names.0, upstream);
+    }
+
+    #[tokio::test]
+    async fn test_find_cache() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        // Create a cache first
+        create_cache(&conn, "my-cache", "keypair", true, "/nix/store", 40, &[])
+            .await
+            .expect("Create failed");
+
+        // Find it
+        let cache_name = "my-cache".parse().expect("Invalid cache name");
+        let found = find_cache(&conn, &cache_name).await.expect("Find failed");
+
+        assert_eq!(found.name, "my-cache");
+    }
+
+    #[tokio::test]
+    async fn test_find_cache_not_found() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        let cache_name = "nonexistent".parse().expect("Invalid cache name");
+        let result = find_cache(&conn, &cache_name).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_soft_delete_cache() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        let cache = create_cache(&conn, "to-delete", "keypair", true, "/nix/store", 40, &[])
+            .await
+            .expect("Create failed");
+
+        // Soft delete
+        soft_delete_cache(&conn, cache.id)
+            .await
+            .expect("Delete failed");
+
+        // Should not be findable now
+        let cache_name = "to-delete".parse().expect("Invalid cache name");
+        let result = find_cache(&conn, &cache_name).await;
+        assert!(result.is_err());
+
+        // But should still exist in database
+        let mut rows = conn
+            .query("SELECT deleted_at FROM cache WHERE id = ?1", [cache.id])
+            .await
+            .expect("Query failed");
+        let row = rows.next().await.expect("Next failed").expect("No row");
+        let deleted_at: Option<String> = row.get(0).ok();
+        assert!(deleted_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_hard_delete_cache() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        let cache = create_cache(&conn, "to-delete", "keypair", true, "/nix/store", 40, &[])
+            .await
+            .expect("Create failed");
+
+        hard_delete_cache(&conn, cache.id)
+            .await
+            .expect("Delete failed");
+
+        // Should be completely gone
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM cache WHERE id = ?1", [cache.id])
+            .await
+            .expect("Query failed");
+        let row = rows.next().await.expect("Next failed").expect("No row");
+        let count: i64 = row.get(0).expect("Get failed");
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_insert_cache_conflict() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        // Insert first time
+        let affected1 = insert_cache(&conn, "dup-cache", "kp1", true, "/nix/store", 40, "[]")
+            .await
+            .expect("First insert failed");
+        assert_eq!(affected1, 1);
+
+        // Insert again with same name - should be ignored
+        let affected2 = insert_cache(&conn, "dup-cache", "kp2", false, "/other/store", 50, "[]")
+            .await
+            .expect("Second insert failed");
+        assert_eq!(affected2, 0);
+
+        // Original should be unchanged
+        let cache_name = "dup-cache".parse().expect("Invalid cache name");
+        let cache = find_cache(&conn, &cache_name).await.expect("Find failed");
+        assert_eq!(cache.keypair, "kp1");
+        assert!(cache.is_public);
+    }
+
+    // ==================== NAR Query Tests ====================
+
+    #[tokio::test]
+    async fn test_create_nar() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        let nar = create_nar(
+            &conn,
+            "sha256:abc123",
+            1024,
+            "zstd",
+            1,
+            NarState::PendingUpload,
+        )
+        .await
+        .expect("Create NAR failed");
+
+        assert_eq!(nar.nar_hash, "sha256:abc123");
+        assert_eq!(nar.nar_size, 1024);
+        assert_eq!(nar.compression, "zstd");
+        assert_eq!(nar.num_chunks, 1);
+        assert_eq!(nar.state, NarState::PendingUpload);
+        assert_eq!(nar.holders_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_update_nar_state() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        let nar = create_nar(
+            &conn,
+            "sha256:def456",
+            2048,
+            "none",
+            1,
+            NarState::PendingUpload,
+        )
+        .await
+        .expect("Create NAR failed");
+
+        // Update to Valid
+        update_nar_state(&conn, nar.id, NarState::Valid)
+            .await
+            .expect("Update failed");
+
+        // Verify
+        let mut rows = conn
+            .query("SELECT state FROM nar WHERE id = ?1", [nar.id])
+            .await
+            .expect("Query failed");
+        let row = rows.next().await.expect("Next failed").expect("No row");
+        let state: String = row.get(0).expect("Get failed");
+        assert_eq!(state, "V");
+    }
+
+    #[tokio::test]
+    async fn test_update_nar_completeness_hint() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        let nar = create_nar(&conn, "sha256:ghi789", 512, "brotli", 2, NarState::Valid)
+            .await
+            .expect("Create NAR failed");
+
+        // Default is 0 (from migration)
+        update_nar_completeness_hint(&conn, nar.id, true)
+            .await
+            .expect("Update failed");
+
+        let mut rows = conn
+            .query("SELECT completeness_hint FROM nar WHERE id = ?1", [nar.id])
+            .await
+            .expect("Query failed");
+        let row = rows.next().await.expect("Next failed").expect("No row");
+        let hint: i64 = row.get(0).expect("Get failed");
+        assert_eq!(hint, 1);
+    }
+
+    #[tokio::test]
+    async fn test_decrement_nar_holders() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        // Create NAR and manually set holders_count
+        let nar = create_nar(&conn, "sha256:jkl012", 100, "none", 1, NarState::Valid)
+            .await
+            .expect("Create NAR failed");
+
+        conn.execute("UPDATE nar SET holders_count = 5 WHERE id = ?1", [nar.id])
+            .await
+            .expect("Update failed");
+
+        // Decrement
+        decrement_nar_holders(&conn, nar.id)
+            .await
+            .expect("Decrement failed");
+
+        let mut rows = conn
+            .query("SELECT holders_count FROM nar WHERE id = ?1", [nar.id])
+            .await
+            .expect("Query failed");
+        let row = rows.next().await.expect("Next failed").expect("No row");
+        let count: i64 = row.get(0).expect("Get failed");
+        assert_eq!(count, 4);
+    }
+
+    // ==================== Object Query Tests ====================
+
+    #[tokio::test]
+    async fn test_bump_object_last_accessed() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        // Create cache and NAR first
+        let cache = create_cache(&conn, "test-cache", "keypair", true, "/nix/store", 40, &[])
+            .await
+            .expect("Create cache failed");
+        let nar = create_nar(&conn, "sha256:obj123", 500, "none", 1, NarState::Valid)
+            .await
+            .expect("Create NAR failed");
+
+        // Insert an object
+        conn.execute(
+            r#"INSERT INTO object (cache_id, nar_id, store_path_hash, store_path, "references", sigs, created_at)
+               VALUES (?1, ?2, 'abc123', '/nix/store/abc123-pkg', '[]', '[]', datetime('now'))"#,
+            (cache.id, nar.id),
+        )
+        .await
+        .expect("Insert object failed");
+
+        // Get object id
+        let mut rows = conn
+            .query("SELECT id FROM object WHERE store_path_hash = 'abc123'", ())
+            .await
+            .expect("Query failed");
+        let row = rows.next().await.expect("Next failed").expect("No row");
+        let object_id: i64 = row.get(0).expect("Get failed");
+
+        // Initially last_accessed_at should be NULL
+        let mut rows = conn
+            .query(
+                "SELECT last_accessed_at FROM object WHERE id = ?1",
+                [object_id],
+            )
+            .await
+            .expect("Query failed");
+        let row = rows.next().await.expect("Next failed").expect("No row");
+        let initial: Option<String> = row.get(0).ok();
+        assert!(initial.is_none());
+
+        // Bump it
+        bump_object_last_accessed(&conn, object_id)
+            .await
+            .expect("Bump failed");
+
+        // Now should be set
+        let mut rows = conn
+            .query(
+                "SELECT last_accessed_at FROM object WHERE id = ?1",
+                [object_id],
+            )
+            .await
+            .expect("Query failed");
+        let row = rows.next().await.expect("Next failed").expect("No row");
+        let updated: String = row.get(0).expect("Get failed");
+        assert!(!updated.is_empty());
+    }
+
+    // ==================== Chunk Query Tests ====================
+
+    #[tokio::test]
+    async fn test_decrement_chunk_holders() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        // Insert a chunk directly
+        conn.execute(
+            r#"INSERT INTO chunk (state, chunk_hash, chunk_size, compression, remote_file, remote_file_id, holders_count, created_at)
+               VALUES ('V', 'sha256:chunk1', 256, 'zstd', 'chunks/c1.zst', 'uuid-c1', 3, datetime('now'))"#,
+            (),
+        )
+        .await
+        .expect("Insert chunk failed");
+
+        let mut rows = conn
+            .query(
+                "SELECT id FROM chunk WHERE chunk_hash = 'sha256:chunk1'",
+                (),
+            )
+            .await
+            .expect("Query failed");
+        let row = rows.next().await.expect("Next failed").expect("No row");
+        let chunk_id: i64 = row.get(0).expect("Get failed");
+
+        // Decrement
+        decrement_chunk_holders(&conn, chunk_id)
+            .await
+            .expect("Decrement failed");
+
+        let mut rows = conn
+            .query("SELECT holders_count FROM chunk WHERE id = ?1", [chunk_id])
+            .await
+            .expect("Query failed");
+        let row = rows.next().await.expect("Next failed").expect("No row");
+        let count: i64 = row.get(0).expect("Get failed");
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_update_chunk_state() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        conn.execute(
+            r#"INSERT INTO chunk (state, chunk_hash, chunk_size, compression, remote_file, remote_file_id, holders_count, created_at)
+               VALUES ('P', 'sha256:chunk2', 128, 'none', 'chunks/c2', 'uuid-c2', 0, datetime('now'))"#,
+            (),
+        )
+        .await
+        .expect("Insert chunk failed");
+
+        let mut rows = conn
+            .query(
+                "SELECT id FROM chunk WHERE chunk_hash = 'sha256:chunk2'",
+                (),
+            )
+            .await
+            .expect("Query failed");
+        let row = rows.next().await.expect("Next failed").expect("No row");
+        let chunk_id: i64 = row.get(0).expect("Get failed");
+
+        // Update state
+        update_chunk_state(&conn, chunk_id, ChunkState::Valid)
+            .await
+            .expect("Update failed");
+
+        let mut rows = conn
+            .query("SELECT state FROM chunk WHERE id = ?1", [chunk_id])
+            .await
+            .expect("Query failed");
+        let row = rows.next().await.expect("Next failed").expect("No row");
+        let state: String = row.get(0).expect("Get failed");
+        assert_eq!(state, "V");
+    }
+
+    // ==================== Update Cache Tests ====================
+
+    #[tokio::test]
+    async fn test_update_cache() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        let cache = create_cache(&conn, "update-test", "keypair", true, "/nix/store", 40, &[])
+            .await
+            .expect("Create cache failed");
+
+        // Update multiple fields (keypair, is_public, store_dir, priority, upstream, retention)
+        let affected = update_cache(
+            &conn,
+            cache.id,
+            None,                 // keypair
+            Some(false),          // is_public
+            Some("/other/store"), // store_dir
+            Some(50),             // priority
+            None,                 // upstream_cache_key_names
+            Some(Some(86400)),    // retention_period
+        )
+        .await
+        .expect("Update failed");
+
+        assert_eq!(affected, 1);
+
+        // Verify changes
+        let cache_name = "update-test".parse().expect("Invalid cache name");
+        let updated = find_cache(&conn, &cache_name).await.expect("Find failed");
+
+        assert!(!updated.is_public);
+        assert_eq!(updated.store_dir, "/other/store");
+        assert_eq!(updated.priority, 50);
+        assert_eq!(updated.retention_period, Some(86400));
+    }
+
+    #[tokio::test]
+    async fn test_update_cache_no_changes() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        let cache = create_cache(&conn, "no-change", "keypair", true, "/nix/store", 40, &[])
+            .await
+            .expect("Create cache failed");
+
+        // Update with no fields
+        let affected = update_cache(&conn, cache.id, None, None, None, None, None, None)
+            .await
+            .expect("Update failed");
+
+        assert_eq!(affected, 0);
+    }
+
+    #[tokio::test]
+    async fn test_update_cache_clear_retention() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        let cache = create_cache(
+            &conn,
+            "retention-test",
+            "keypair",
+            true,
+            "/nix/store",
+            40,
+            &[],
+        )
+        .await
+        .expect("Create cache failed");
+
+        // Set retention period
+        update_cache(
+            &conn,
+            cache.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Some(3600)),
+        )
+        .await
+        .expect("Set retention failed");
+
+        // Clear it
+        update_cache(&conn, cache.id, None, None, None, None, None, Some(None))
+            .await
+            .expect("Clear retention failed");
+
+        let cache_name = "retention-test".parse().expect("Invalid cache name");
+        let updated = find_cache(&conn, &cache_name).await.expect("Find failed");
+        assert!(updated.retention_period.is_none());
+    }
+
+    // ==================== Integration Tests for Bug Replication ====================
+
+    /// Test that insert_object_upsert works correctly.
+    /// This tests the SQL syntax with the `references` column (reserved keyword).
+    /// BUG: `references` is a SQL reserved keyword and must be quoted as `"references"`.
+    #[tokio::test]
+    async fn test_insert_object_upsert_references_keyword() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        // Create cache and NAR
+        let cache = create_cache(&conn, "test-cache", "keypair", true, "/nix/store", 40, &[])
+            .await
+            .expect("Create cache failed");
+
+        let nar = create_nar(&conn, "sha256:testnar123", 1024, "none", 1, NarState::Valid)
+            .await
+            .expect("Create NAR failed");
+
+        // This should work but will fail with:
+        // "sqlite3 parser error: near REFERENCES, "None": syntax error"
+        // because `references` is a SQL reserved keyword
+        let result = insert_object_upsert(
+            &conn,
+            cache.id,
+            nar.id,
+            "abc123hash",
+            "/nix/store/abc123hash-test-pkg",
+            r#"["/nix/store/dep1", "/nix/store/dep2"]"#,
+            None,
+            Some("/nix/store/builder.drv"),
+            r#"["sig1", "sig2"]"#,
+            None,
+            Some("test-user"),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "insert_object_upsert failed: {:?}",
+            result.err()
+        );
+    }
+
+    /// Test find_object_without_chunks with the `references` column.
+    /// BUG: The query uses `o.references` which should be `o."references"`.
+    #[tokio::test]
+    async fn test_find_object_references_keyword() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        // Create cache, NAR, and object
+        let cache = create_cache(&conn, "find-test", "keypair", true, "/nix/store", 40, &[])
+            .await
+            .expect("Create cache failed");
+
+        let nar = create_nar(&conn, "sha256:findnar456", 2048, "zstd", 1, NarState::Valid)
+            .await
+            .expect("Create NAR failed");
+
+        // Insert object directly using raw SQL (this works because we quote references)
+        // Store path hash must be exactly 32 chars of nix base32: [0123456789abcdfghijklmnpqrsvwxyz]
+        let hash_32 = "0123456789abcdfghijklmnpqrsvwxyz"; // exactly 32 valid chars
+        conn.execute(
+            r#"INSERT INTO object (cache_id, nar_id, store_path_hash, store_path, "references", sigs, created_at)
+               VALUES (?1, ?2, ?3, '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-pkg', '[]', '[]', datetime('now'))"#,
+            (cache.id, nar.id, hash_32),
+        )
+        .await
+        .expect("Insert object failed");
+
+        // Now try to find it using find_object_and_chunks_by_store_path_hash
+        // This will fail because the query uses unquoted `references`
+        let cache_name: attic::cache::CacheName = "find-test".parse().expect("Invalid cache name");
+        // Store path hash must be exactly 32 characters
+        let store_path_hash =
+            attic::nix_store::StorePathHash::new(hash_32.to_string()).unwrap();
+
+        let result =
+            find_object_and_chunks_by_store_path_hash(&conn, &cache_name, &store_path_hash, false)
+                .await;
+
+        assert!(
+            result.is_ok(),
+            "find_object_and_chunks_by_store_path_hash failed: {:?}",
+            result.err()
+        );
+    }
+
+    /// Test find_object_with_chunks (include_chunks=true).
+    /// BUG: The query uses `o.references` which should be `o."references"`.
+    #[tokio::test]
+    async fn test_find_object_with_chunks_references_keyword() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        // Create cache, NAR, chunk, chunkref, and object
+        let cache = create_cache(&conn, "chunks-test", "keypair", true, "/nix/store", 40, &[])
+            .await
+            .expect("Create cache failed");
+
+        let nar = create_nar(&conn, "sha256:chunkednar789", 4096, "zstd", 1, NarState::Valid)
+            .await
+            .expect("Create NAR failed");
+
+        // Insert chunk (remote_file is a tagged enum: {"Local": {"name": "..."}} or {"S3": {...}})
+        let chunk = insert_chunk(
+            &conn,
+            ChunkState::Valid,
+            "sha256:chunk001",
+            4096,
+            "zstd",
+            r#"{"Local":{"name":"chunks/test.zst"}}"#,
+            "chunk-uuid-001",
+        )
+        .await
+        .expect("Insert chunk failed");
+
+        // Insert chunkref
+        insert_chunkref(&conn, nar.id, 0, Some(chunk.id), "sha256:chunk001", "zstd")
+            .await
+            .expect("Insert chunkref failed");
+
+        // Insert object directly (store path hash must be exactly 32 chars of nix base32)
+        let hash_32 = "zyxwvsrqpnmlkjihgfdcba9876543210"; // exactly 32 valid chars
+        conn.execute(
+            r#"INSERT INTO object (cache_id, nar_id, store_path_hash, store_path, "references", sigs, created_at)
+               VALUES (?1, ?2, ?3, '/nix/store/zyxwvsrqpnmlkjihgfdcba9876543210-pkg', '[]', '[]', datetime('now'))"#,
+            (cache.id, nar.id, hash_32),
+        )
+        .await
+        .expect("Insert object failed");
+
+        // Now try to find it with chunks
+        let cache_name: attic::cache::CacheName = "chunks-test".parse().expect("Invalid cache name");
+        let store_path_hash =
+            attic::nix_store::StorePathHash::new(hash_32.to_string()).unwrap();
+
+        let result =
+            find_object_and_chunks_by_store_path_hash(&conn, &cache_name, &store_path_hash, true)
+                .await;
+
+        assert!(
+            result.is_ok(),
+            "find_object_with_chunks failed: {:?}",
+            result.err()
+        );
+
+        let (object, _cache, _nar, chunks) = result.unwrap();
+        assert_eq!(object.store_path_hash, hash_32);
+        assert_eq!(chunks.len(), 1);
+    }
+
+    /// Test transaction commit without active transaction.
+    /// BUG: Calling commit() when no transaction is active causes
+    /// "SQLite error: cannot commit - no transaction is active"
+    #[tokio::test]
+    async fn test_commit_without_transaction() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        // Try to commit without starting a transaction
+        let result = conn.commit().await;
+
+        // This should fail with "cannot commit - no transaction is active"
+        // If it succeeds, that's also acceptable (libSQL might handle this gracefully)
+        if let Err(e) = &result {
+            let err_str = e.to_string().to_lowercase();
+            assert!(
+                err_str.contains("no transaction") || err_str.contains("not in a transaction"),
+                "Expected 'no transaction' error, got: {}",
+                e
+            );
+        }
+    }
+
+    /// Test nested transactions.
+    /// BUG: Starting a transaction when one is already active causes
+    /// "SQLite error: cannot start a transaction within a transaction"
+    #[tokio::test]
+    async fn test_nested_transaction_error() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        // Start first transaction
+        conn.begin_transaction()
+            .await
+            .expect("First transaction should start");
+
+        // Try to start another transaction - this should fail
+        let result = conn.begin_transaction().await;
+
+        // Clean up - rollback the first transaction
+        let _ = conn.rollback().await;
+
+        // The second begin_transaction should have failed
+        assert!(
+            result.is_err(),
+            "Nested transaction should fail, but it succeeded"
+        );
+
+        if let Err(e) = result {
+            let err_str = e.to_string().to_lowercase();
+            assert!(
+                err_str.contains("within a transaction")
+                    || err_str.contains("nested")
+                    || err_str.contains("already"),
+                "Expected nested transaction error, got: {}",
+                e
+            );
+        }
+    }
+
+    /// Test the full upload flow simulation.
+    /// This replicates the upload_path_new_unchunked workflow.
+    #[tokio::test]
+    async fn test_upload_flow_transaction_handling() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        // Create cache
+        let cache = create_cache(&conn, "upload-test", "keypair", true, "/nix/store", 40, &[])
+            .await
+            .expect("Create cache failed");
+
+        // Simulate chunk upload (outside transaction)
+        let chunk = insert_chunk(
+            &conn,
+            ChunkState::PendingUpload,
+            "sha256:uploadchunk",
+            1024,
+            "zstd",
+            r#"{"Local":{"name":"chunks/upload.zst"}}"#,
+            "upload-chunk-uuid",
+        )
+        .await
+        .expect("Insert chunk failed");
+
+        // Begin transaction for final updates
+        conn.begin_transaction()
+            .await
+            .expect("Begin transaction failed");
+
+        // Update chunk to valid
+        let updated_chunk = update_chunk(
+            &conn,
+            chunk.id,
+            Some(ChunkState::Valid),
+            Some("sha256:filehash"),
+            Some(512),
+            Some(1),
+        )
+        .await
+        .expect("Update chunk failed");
+
+        assert_eq!(updated_chunk.state, ChunkState::Valid);
+
+        // Create NAR
+        let nar = insert_nar(&conn, NarState::Valid, "sha256:uploadnar", 1024, "zstd", 1)
+            .await
+            .expect("Insert NAR failed");
+
+        // Create chunkref
+        insert_chunkref(
+            &conn,
+            nar.id,
+            0,
+            Some(chunk.id),
+            "sha256:uploadchunk",
+            "zstd",
+        )
+        .await
+        .expect("Insert chunkref failed");
+
+        // Create object - this is where the references bug would manifest
+        let object_result = insert_object_upsert(
+            &conn,
+            cache.id,
+            nar.id,
+            "uploadhash789",
+            "/nix/store/uploadhash789-test",
+            r#"[]"#,
+            None,
+            None,
+            r#"[]"#,
+            None,
+            Some("uploader"),
+        )
+        .await;
+
+        match object_result {
+            Ok(_) => {
+                // Commit should succeed
+                conn.commit().await.expect("Commit failed");
+            }
+            Err(e) => {
+                // Rollback and fail the test
+                let _ = conn.rollback().await;
+                panic!("insert_object_upsert failed: {:?}", e);
+            }
+        }
+    }
 }
