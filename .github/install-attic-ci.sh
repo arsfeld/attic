@@ -5,6 +5,7 @@ expr=$(mktemp)
 cleanup() {
   rm -f "$expr"
 }
+trap cleanup EXIT
 
 cat >"$expr" <<'EOF'
   { system ? builtins.currentSystem }:
@@ -65,4 +66,9 @@ in
 
 EOF
 
-nix-env --substituters "https://staging.attic.rs/attic-ci https://cache.nixos.org" --trusted-public-keys "attic-ci:U5Sey4mUxwBXM3iFapmP0/ogODXywKLRNgRPQpEXxbo= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=" -if "$expr"
+outpath=$(nix build --no-link --print-out-paths --file "$expr" \
+  --extra-substituters "https://staging.attic.rs/attic-ci https://cache.nixos.org" \
+  --extra-trusted-public-keys "attic-ci:U5Sey4mUxwBXM3iFapmP0/ogODXywKLRNgRPQpEXxbo= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=")
+
+# Add attic to the profile
+nix profile install "$outpath"
