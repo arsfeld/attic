@@ -18,6 +18,8 @@ mod api;
 mod compression;
 pub mod config;
 pub mod database;
+#[cfg(feature = "turso")]
+pub mod database_turso;
 pub mod error;
 pub mod gc;
 mod middleware;
@@ -49,6 +51,8 @@ use access::http::{apply_auth, AuthState};
 use attic::cache::CacheName;
 use config::{Config, StorageConfig};
 use database::migration::{Migrator, MigratorTrait};
+#[cfg(feature = "turso")]
+use database_turso::connection::{TursoConfig, TursoConnection};
 use error::{ErrorKind, ServerError, ServerResult};
 use middleware::{init_request_state, restrict_host, set_visibility_header};
 use storage::{LocalBackend, S3Backend, StorageBackend};
@@ -62,8 +66,12 @@ pub struct StateInner {
     /// The Attic Server configuration.
     config: Config,
 
-    /// Handle to the database.
+    /// Handle to the database (SeaORM backend).
     database: OnceCell<DatabaseConnection>,
+
+    /// Handle to the database (Turso backend).
+    #[cfg(feature = "turso")]
+    database_turso: OnceCell<Arc<TursoConnection>>,
 
     /// Handle to the storage backend.
     storage: OnceCell<Arc<Box<dyn StorageBackend>>>,
@@ -99,19 +107,24 @@ impl StateInner {
         Arc::new(Self {
             config,
             database: OnceCell::new(),
+            #[cfg(feature = "turso")]
+            database_turso: OnceCell::new(),
             storage: OnceCell::new(),
         })
     }
 
     /// Returns a handle to the database.
+    #[cfg(feature = "seaorm-base")]
     async fn database(&self) -> ServerResult<&DatabaseConnection> {
         self.database
             .get_or_try_init(|| async {
                 let db = Database::connect(&self.config.database.url)
                     .await
                     .map_err(ServerError::database_error);
+                // SQLite-specific performance optimizations
+                // Only available when sqlx-sqlite feature is enabled (seaorm feature, not seaorm-postgres)
+                #[cfg(all(feature = "seaorm", not(feature = "seaorm-postgres")))]
                 if let Ok(DatabaseConnection::SqlxSqlitePoolConnection(ref conn)) = db {
-                    // execute some sqlite-specific performance optimizations
                     // see https://phiresky.github.io/blog/2020/sqlite-performance-tuning/ for
                     // more details
                     // intentionally ignore errors from this: this is purely for performance,
@@ -129,6 +142,19 @@ impl StateInner {
                 }
 
                 db
+            })
+            .await
+    }
+
+    /// Returns a handle to the Turso database backend.
+    #[cfg(feature = "turso")]
+    pub async fn database_turso(&self) -> ServerResult<&Arc<TursoConnection>> {
+        self.database_turso
+            .get_or_try_init(|| async {
+                let turso_config = TursoConfig::from_database_config(&self.config.database);
+                TursoConnection::connect(turso_config)
+                    .await
+                    .map_err(|e| ServerError::database_error(database_turso::TursoDbError(e.to_string())))
             })
             .await
     }
@@ -262,6 +288,18 @@ pub async fn run_migrations(config: Config) -> Result<()> {
     let state = StateInner::new(config).await;
     let db = state.database().await?;
     Migrator::up(db, None).await?;
+
+    Ok(())
+}
+
+/// Runs Turso-specific database migrations.
+#[cfg(feature = "turso")]
+pub async fn run_turso_migrations(config: Config) -> Result<()> {
+    eprintln!("Running Turso migrations...");
+
+    let state = StateInner::new(config).await;
+    let db = state.database_turso().await?;
+    database_turso::migrations::run_migrations(db).await?;
 
     Ok(())
 }

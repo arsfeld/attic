@@ -27,6 +27,62 @@ And yes, it works on macOS too!
 - **Scalabilty**: Attic can be easily replicated. It's designed to be deployed to serverless platforms like fly.io but also works nicely in a single-machine setup.
 - **Garbage Collection**: Unused store paths can be garbage-collected in an LRU manner.
 
+## Database Backends
+
+Attic supports multiple database backends:
+
+### SeaORM (Default)
+
+The default backend uses SeaORM with support for PostgreSQL and SQLite:
+
+```bash
+# Build with default features (PostgreSQL + SQLite)
+cargo build -p attic-server
+```
+
+Configuration:
+```toml
+[database]
+url = "sqlite:///path/to/attic.db"
+# or
+url = "postgres://user:pass@host/attic"
+```
+
+### Turso (libSQL)
+
+For deployments on platforms like Fly.io where fast startup times are critical, Attic supports [Turso](https://turso.tech/) - a distributed SQLite database with embedded replicas:
+
+```bash
+# Build with Turso support
+cargo build -p attic-server --no-default-features --features turso
+```
+
+Configuration:
+```toml
+[database]
+url = "libsql://your-db.turso.io"
+auth_token = "your-turso-auth-token"
+# Optional: Use embedded replica for microsecond reads
+local_replica_path = "/tmp/attic-replica.db"
+sync_interval = 60  # seconds
+```
+
+Benefits of Turso:
+- **No cold starts**: Turso databases are always-on
+- **Microsecond reads**: Embedded replicas sync locally for ultra-fast reads
+- **SQLite compatibility**: Uses familiar SQLite SQL syntax
+
+#### Migrating from SQLite to Turso
+
+Use the built-in migration tool:
+
+```bash
+atticadm migrate-to-turso \
+    --source /path/to/attic.db \
+    --turso-url libsql://your-db.turso.io \
+    --auth-token $TURSO_AUTH_TOKEN
+```
+
 ## Licensing
 
 Attic is available under the **Apache License, Version 2.0**.

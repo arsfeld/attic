@@ -72,16 +72,17 @@ features = [
 
 [dependencies.sea-orm]
 version = "1.1.13"
+optional = true
+default-features = false
 features = [
 	"runtime-tokio-rustls",
 	"macros",
-	"sqlx-postgres",
-	"sqlx-sqlite",
 	"debug-print",
 ]
 
 [dependencies.sea-orm-migration]
 version = "1.1.13"
+optional = true
 
 [dependencies.tokio]
 version = "1.46.1"
@@ -94,3 +95,20 @@ features = [
 	"rt-multi-thread",
 	"sync",
 ]
+
+[dependencies.libsql]
+version = "0.6"
+optional = true
+
+[features]
+default = ["seaorm"]
+# Base SeaORM support (used by all SeaORM variants)
+seaorm-base = ["dep:sea-orm", "dep:sea-orm-migration", "sea-orm/with-chrono", "sea-orm/with-json"]
+# SeaORM backend (PostgreSQL + SQLite via sqlx)
+seaorm = ["seaorm-base", "sea-orm/sqlx-postgres", "sea-orm/sqlx-sqlite"]
+# SeaORM with PostgreSQL only (no sqlx-sqlite to avoid linker conflicts with libsql)
+seaorm-postgres = ["seaorm-base", "sea-orm/sqlx-postgres"]
+# Turso/libSQL backend - uses seaorm-postgres to avoid sqlite symbol conflicts
+# NOTE: Cannot be combined with seaorm feature due to duplicate sqlite3 symbols
+# Build with: cargo build --no-default-features --features turso
+turso = ["dep:libsql", "seaorm-postgres"]

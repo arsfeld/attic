@@ -45,6 +45,9 @@ const ENV_TOKEN_RS256_PUBKEY_BASE64: &str = "ATTIC_SERVER_TOKEN_RS256_PUBKEY_BAS
 /// Environment variable storing the database connection string.
 const ENV_DATABASE_URL: &str = "ATTIC_SERVER_DATABASE_URL";
 
+/// Environment variable storing the Turso auth token.
+const ENV_TURSO_AUTH_TOKEN: &str = "ATTIC_SERVER_TURSO_AUTH_TOKEN";
+
 /// Configuration for the Attic Server.
 #[derive(Clone, Deserialize, derive_more::Debug)]
 #[serde(deny_unknown_fields)]
@@ -206,6 +209,11 @@ impl From<JWTSigningConfig> for SignatureType {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
     /// Connection URL.
+    ///
+    /// Supports:
+    /// - `sqlite://path/to/db.sqlite` - Local SQLite database
+    /// - `postgres://...` - PostgreSQL database (SeaORM only)
+    /// - `libsql://xxx.turso.io` - Turso cloud database (Turso feature only)
     #[serde(default = "load_database_url_from_env")]
     pub url: String,
 
@@ -214,6 +222,30 @@ pub struct DatabaseConfig {
     /// If enabled, a heartbeat query will be sent every minute.
     #[serde(default = "default_db_heartbeat")]
     pub heartbeat: bool,
+
+    /// Auth token for Turso databases.
+    ///
+    /// Required when using `libsql://` URLs. Can also be set via
+    /// the `ATTIC_SERVER_TURSO_AUTH_TOKEN` environment variable.
+    #[serde(rename = "auth-token")]
+    #[serde(default = "load_turso_auth_token_from_env")]
+    pub auth_token: Option<String>,
+
+    /// Path to local embedded replica for Turso.
+    ///
+    /// When using Turso, this enables embedded replicas for
+    /// microsecond-latency reads. The replica is kept in sync
+    /// with the remote database.
+    #[serde(rename = "local-replica-path")]
+    pub local_replica_path: Option<std::path::PathBuf>,
+
+    /// Sync interval for Turso embedded replicas, in seconds.
+    ///
+    /// How often to sync the local replica with the remote database.
+    /// Default is 60 seconds. Only used when `local_replica_path` is set.
+    #[serde(rename = "sync-interval")]
+    #[serde(with = "humantime_serde", default)]
+    pub sync_interval: Option<Duration>,
 }
 
 /// File storage configuration.
@@ -418,6 +450,10 @@ fn load_database_url_from_env() -> String {
         "Database URL must be specified in either database.url \
         or the {ENV_DATABASE_URL} environment."
     ))
+}
+
+fn load_turso_auth_token_from_env() -> Option<String> {
+    read_non_empty_var(ENV_TURSO_AUTH_TOKEN).ok().flatten()
 }
 
 impl Default for JWTConfig {

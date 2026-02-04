@@ -8,6 +8,8 @@ use enum_as_inner::EnumAsInner;
 
 use attic_server::config;
 use command::make_token::{self, MakeToken};
+#[cfg(feature = "turso")]
+use command::migrate_to_turso::{self, MigrateToTurso};
 
 /// Attic server administration utilities.
 #[derive(Debug, Parser)]
@@ -26,6 +28,8 @@ pub struct Opts {
 #[derive(Debug, Subcommand, EnumAsInner)]
 pub enum Command {
     MakeToken(MakeToken),
+    #[cfg(feature = "turso")]
+    MigrateToTurso(MigrateToTurso),
 }
 
 #[tokio::main]
@@ -35,6 +39,8 @@ async fn main() -> Result<()> {
 
     match opts.command {
         Command::MakeToken(_) => make_token::run(config, opts).await?,
+        #[cfg(feature = "turso")]
+        Command::MigrateToTurso(_) => migrate_to_turso::run(config, opts).await?,
     }
 
     Ok(())
