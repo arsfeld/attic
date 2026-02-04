@@ -56,11 +56,80 @@ pub struct MigrateToTurso {
 
 /// Tables in order of dependency (referential integrity).
 const TABLES: &[(&str, &[&str])] = &[
-    ("cache", &["id", "name", "keypair", "is_public", "store_dir", "priority", "upstream_cache_key_names", "created_at", "deleted_at", "retention_period"]),
-    ("nar", &["id", "state", "nar_hash", "nar_size", "compression", "num_chunks", "completeness_hint", "holders_count", "created_at"]),
-    ("chunk", &["id", "state", "chunk_hash", "chunk_size", "file_hash", "file_size", "compression", "remote_file", "remote_file_id", "holders_count", "created_at"]),
-    ("object", &["id", "cache_id", "nar_id", "store_path_hash", "store_path", "references", "system", "deriver", "sigs", "ca", "created_at", "last_accessed_at", "created_by"]),
-    ("chunkref", &["id", "nar_id", "seq", "chunk_id", "chunk_hash", "compression"]),
+    (
+        "cache",
+        &[
+            "id",
+            "name",
+            "keypair",
+            "is_public",
+            "store_dir",
+            "priority",
+            "upstream_cache_key_names",
+            "created_at",
+            "deleted_at",
+            "retention_period",
+        ],
+    ),
+    (
+        "nar",
+        &[
+            "id",
+            "state",
+            "nar_hash",
+            "nar_size",
+            "compression",
+            "num_chunks",
+            "completeness_hint",
+            "holders_count",
+            "created_at",
+        ],
+    ),
+    (
+        "chunk",
+        &[
+            "id",
+            "state",
+            "chunk_hash",
+            "chunk_size",
+            "file_hash",
+            "file_size",
+            "compression",
+            "remote_file",
+            "remote_file_id",
+            "holders_count",
+            "created_at",
+        ],
+    ),
+    (
+        "object",
+        &[
+            "id",
+            "cache_id",
+            "nar_id",
+            "store_path_hash",
+            "store_path",
+            "references",
+            "system",
+            "deriver",
+            "sigs",
+            "ca",
+            "created_at",
+            "last_accessed_at",
+            "created_by",
+        ],
+    ),
+    (
+        "chunkref",
+        &[
+            "id",
+            "nar_id",
+            "seq",
+            "chunk_id",
+            "chunk_hash",
+            "compression",
+        ],
+    ),
 ];
 
 pub async fn run(_config: Config, opts: Opts) -> Result<()> {
@@ -124,7 +193,8 @@ pub async fn run(_config: Config, opts: Opts) -> Result<()> {
 
     // Find starting table
     let start_idx = if let Some(ref resume_table) = sub.resume_from {
-        TABLES.iter()
+        TABLES
+            .iter()
             .position(|(name, _)| *name == resume_table)
             .ok_or_else(|| anyhow!("Unknown table: {}", resume_table))?
     } else {
@@ -135,7 +205,10 @@ pub async fn run(_config: Config, opts: Opts) -> Result<()> {
     for (table_name, columns) in &TABLES[start_idx..] {
         if sub.dry_run {
             let count = count_rows(&source, table_name).await?;
-            eprintln!("  [DRY RUN] Would copy {} rows from table '{}'", count, table_name);
+            eprintln!(
+                "  [DRY RUN] Would copy {} rows from table '{}'",
+                count, table_name
+            );
         } else {
             migrate_table(&source, &turso, table_name, columns, sub.batch_size).await?;
         }
@@ -150,8 +223,15 @@ pub async fn run(_config: Config, opts: Opts) -> Result<()> {
         for (table_name, _) in TABLES {
             let source_count = count_rows(&source, table_name).await?;
             let turso_count = count_rows(&turso, table_name).await?;
-            let status = if source_count == turso_count { "✓" } else { "✗" };
-            eprintln!("  {} {}: {} -> {}", status, table_name, source_count, turso_count);
+            let status = if source_count == turso_count {
+                "✓"
+            } else {
+                "✗"
+            };
+            eprintln!(
+                "  {} {}: {} -> {}",
+                status, table_name, source_count, turso_count
+            );
         }
     }
 
@@ -183,9 +263,7 @@ async fn migrate_table(
     }
 
     let column_list = columns.join(", ");
-    let placeholders: Vec<_> = (1..=columns.len())
-        .map(|i| format!("?{}", i))
-        .collect();
+    let placeholders: Vec<_> = (1..=columns.len()).map(|i| format!("?{}", i)).collect();
     let placeholder_list = placeholders.join(", ");
 
     let select_sql = format!(
@@ -213,7 +291,9 @@ async fn migrate_table(
 
             // Execute the insert - for simplicity, we insert one at a time
             // (libsql doesn't support batch insert with different values easily)
-            turso.execute(&insert_sql, values).await
+            turso
+                .execute(&insert_sql, values)
+                .await
                 .map_err(|e| anyhow!("Failed to insert into {}: {}", table_name, e))?;
 
             batch_count += 1;
@@ -224,7 +304,12 @@ async fn migrate_table(
             break;
         }
 
-        eprintln!("  Progress: {}/{} ({:.1}%)", migrated, total, (migrated as f64 / total as f64) * 100.0);
+        eprintln!(
+            "  Progress: {}/{} ({:.1}%)",
+            migrated,
+            total,
+            (migrated as f64 / total as f64) * 100.0
+        );
         offset += batch_size as i64;
     }
 

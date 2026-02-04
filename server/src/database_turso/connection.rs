@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use libsql::{Builder, Connection, Database, params::IntoParams};
+use libsql::{params::IntoParams, Builder, Connection, Database};
 use tokio::sync::RwLock;
 
 use crate::config::DatabaseConfig;

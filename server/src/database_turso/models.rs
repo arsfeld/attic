@@ -328,7 +328,11 @@ impl ChunkModel {
     }
 
     /// Tries to parse a ChunkModel from a row, returning None if the id column is NULL.
-    pub fn try_from_row_prefixed(row: &Row, _prefix: &str, start_idx: usize) -> Result<Option<Self>> {
+    pub fn try_from_row_prefixed(
+        row: &Row,
+        _prefix: &str,
+        start_idx: usize,
+    ) -> Result<Option<Self>> {
         let start = start_idx as i32;
         // Check if the id column is NULL (indicating a missing chunk due to LEFT JOIN)
         if row.get::<Option<i64>>(start)?.is_none() {
@@ -391,13 +395,11 @@ fn parse_datetime(s: &str) -> Result<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
         .or_else(|_| {
             // Try SQLite's default format: "YYYY-MM-DD HH:MM:SS"
-            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
-                .map(|dt| dt.and_utc())
+            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").map(|dt| dt.and_utc())
         })
         .or_else(|_| {
             // Try with fractional seconds
-            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
-                .map(|dt| dt.and_utc())
+            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f").map(|dt| dt.and_utc())
         })
         .map_err(|e| anyhow!("Failed to parse datetime '{}': {}", s, e))
 }
@@ -410,7 +412,10 @@ mod tests {
     fn test_nar_state_conversion() {
         assert_eq!(NarState::from_db_value("V").unwrap(), NarState::Valid);
         assert_eq!(NarState::Valid.to_db_value(), "V");
-        assert_eq!(NarState::from_db_value("P").unwrap(), NarState::PendingUpload);
+        assert_eq!(
+            NarState::from_db_value("P").unwrap(),
+            NarState::PendingUpload
+        );
         assert_eq!(NarState::PendingUpload.to_db_value(), "P");
     }
 

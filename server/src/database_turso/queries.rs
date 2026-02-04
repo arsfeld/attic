@@ -33,10 +33,7 @@ fn db_err<E: std::fmt::Display>(e: E) -> ServerError {
 }
 
 /// Finds a cache by name.
-pub async fn find_cache(
-    conn: &TursoConnection,
-    cache: &CacheName,
-) -> ServerResult<CacheModel> {
+pub async fn find_cache(conn: &TursoConnection, cache: &CacheName) -> ServerResult<CacheModel> {
     let sql = r#"
         SELECT id, name, keypair, is_public, store_dir, priority,
                upstream_cache_key_names, created_at, deleted_at, retention_period
@@ -44,9 +41,7 @@ pub async fn find_cache(
         WHERE name = ?1 AND deleted_at IS NULL
     "#;
 
-    let mut rows = conn.query(sql, [cache.as_str()])
-        .await
-        .map_err(db_err)?;
+    let mut rows = conn.query(sql, [cache.as_str()]).await.map_err(db_err)?;
 
     match rows.next().await.map_err(db_err)? {
         Some(row) => CacheModel::from_row(&row).map_err(db_err),
@@ -92,16 +87,17 @@ async fn find_object_without_chunks(
           AND n.state = 'V'
     "#;
 
-    let mut rows = conn.query(sql, (cache.as_str(), store_path_hash.as_str()))
+    let mut rows = conn
+        .query(sql, (cache.as_str(), store_path_hash.as_str()))
         .await
         .map_err(db_err)?;
 
     match rows.next().await.map_err(db_err)? {
         Some(row) => {
-            let object = ObjectModel::from_row_prefixed(&row, "o_", 0)
-                .map_err(db_err)?;
-            let cache_model = CacheModel::from_row_prefixed(&row, "c_", ObjectModel::column_count())
-                .map_err(db_err)?;
+            let object = ObjectModel::from_row_prefixed(&row, "o_", 0).map_err(db_err)?;
+            let cache_model =
+                CacheModel::from_row_prefixed(&row, "c_", ObjectModel::column_count())
+                    .map_err(db_err)?;
             let nar = NarModel::from_row_prefixed(
                 &row,
                 "n_",
@@ -146,7 +142,8 @@ async fn find_object_with_chunks(
         ORDER BY cr.seq ASC
     "#;
 
-    let mut rows = conn.query(sql, (cache.as_str(), store_path_hash.as_str()))
+    let mut rows = conn
+        .query(sql, (cache.as_str(), store_path_hash.as_str()))
         .await
         .map_err(db_err)?;
 
@@ -155,10 +152,10 @@ async fn find_object_with_chunks(
 
     while let Some(row) = rows.next().await.map_err(db_err)? {
         if first_row.is_none() {
-            let object = ObjectModel::from_row_prefixed(&row, "o_", 0)
-                .map_err(db_err)?;
-            let cache_model = CacheModel::from_row_prefixed(&row, "c_", ObjectModel::column_count())
-                .map_err(db_err)?;
+            let object = ObjectModel::from_row_prefixed(&row, "o_", 0).map_err(db_err)?;
+            let cache_model =
+                CacheModel::from_row_prefixed(&row, "c_", ObjectModel::column_count())
+                    .map_err(db_err)?;
             let nar = NarModel::from_row_prefixed(
                 &row,
                 "n_",
@@ -168,9 +165,10 @@ async fn find_object_with_chunks(
             first_row = Some((object, cache_model, nar));
         }
 
-        let chunk_start_idx = ObjectModel::column_count() + CacheModel::column_count() + NarModel::column_count();
-        let chunk = ChunkModel::try_from_row_prefixed(&row, "ch_", chunk_start_idx)
-            .map_err(db_err)?;
+        let chunk_start_idx =
+            ObjectModel::column_count() + CacheModel::column_count() + NarModel::column_count();
+        let chunk =
+            ChunkModel::try_from_row_prefixed(&row, "ch_", chunk_start_idx).map_err(db_err)?;
         chunks.push(chunk);
     }
 
@@ -208,7 +206,8 @@ pub async fn find_and_lock_nar(
                   num_chunks, completeness_hint, holders_count, created_at
     "#;
 
-    let mut rows = conn.query(sql, [nar_hash.to_typed_base16()])
+    let mut rows = conn
+        .query(sql, [nar_hash.to_typed_base16()])
         .await
         .map_err(db_err)?;
 
@@ -239,7 +238,14 @@ pub async fn find_and_lock_chunk(
                   compression, remote_file, remote_file_id, holders_count, created_at
     "#;
 
-    let mut rows = conn.query(sql, (chunk_hash.to_typed_base16(), compression.as_str().to_string()))
+    let mut rows = conn
+        .query(
+            sql,
+            (
+                chunk_hash.to_typed_base16(),
+                compression.as_str().to_string(),
+            ),
+        )
         .await
         .map_err(db_err)?;
 
@@ -267,16 +273,11 @@ pub async fn decrement_chunk_holders(conn: &TursoConnection, chunk_id: i64) -> a
 }
 
 /// Bumps the last_accessed_at timestamp of an object.
-pub async fn bump_object_last_accessed(
-    conn: &TursoConnection,
-    object_id: i64,
-) -> ServerResult<()> {
+pub async fn bump_object_last_accessed(conn: &TursoConnection, object_id: i64) -> ServerResult<()> {
     let now = Utc::now().to_rfc3339();
     let sql = "UPDATE object SET last_accessed_at = ?1 WHERE id = ?2";
 
-    conn.execute(sql, (now, object_id))
-        .await
-        .map_err(db_err)?;
+    conn.execute(sql, (now, object_id)).await.map_err(db_err)?;
 
     Ok(())
 }
@@ -296,8 +297,7 @@ pub async fn create_cache(
     upstream_cache_key_names: &[String],
 ) -> ServerResult<CacheModel> {
     let now = Utc::now().to_rfc3339();
-    let upstream_json = serde_json::to_string(upstream_cache_key_names)
-        .map_err(db_err)?;
+    let upstream_json = serde_json::to_string(upstream_cache_key_names).map_err(db_err)?;
     let is_public_i64 = if is_public { 1i64 } else { 0i64 };
 
     let sql = r#"
@@ -308,15 +308,19 @@ pub async fn create_cache(
                   upstream_cache_key_names, created_at, deleted_at, retention_period
     "#;
 
-    let mut rows = conn.query(sql, (
-        name,
-        keypair,
-        is_public_i64,
-        store_dir,
-        priority as i64,
-        upstream_json.as_str(),
-        now.as_str(),
-    ))
+    let mut rows = conn
+        .query(
+            sql,
+            (
+                name,
+                keypair,
+                is_public_i64,
+                store_dir,
+                priority as i64,
+                upstream_json.as_str(),
+                now.as_str(),
+            ),
+        )
         .await
         .map_err(db_err)?;
 
@@ -345,14 +349,18 @@ pub async fn create_nar(
                   num_chunks, completeness_hint, holders_count, created_at
     "#;
 
-    let mut rows = conn.query(sql, (
-        state.to_db_value(),
-        nar_hash,
-        nar_size,
-        compression,
-        num_chunks as i64,
-        now.as_str(),
-    ))
+    let mut rows = conn
+        .query(
+            sql,
+            (
+                state.to_db_value(),
+                nar_hash,
+                nar_size,
+                compression,
+                num_chunks as i64,
+                now.as_str(),
+            ),
+        )
         .await
         .map_err(db_err)?;
 
@@ -396,9 +404,7 @@ pub async fn update_nar_completeness_hint(
 ) -> ServerResult<()> {
     let sql = "UPDATE nar SET completeness_hint = ?1 WHERE id = ?2";
     let hint = if completeness_hint { 1i64 } else { 0i64 };
-    conn.execute(sql, (hint, nar_id))
-        .await
-        .map_err(db_err)?;
+    conn.execute(sql, (hint, nar_id)).await.map_err(db_err)?;
     Ok(())
 }
 
@@ -406,9 +412,7 @@ pub async fn update_nar_completeness_hint(
 pub async fn soft_delete_cache(conn: &TursoConnection, cache_id: i64) -> ServerResult<()> {
     let now = Utc::now().to_rfc3339();
     let sql = "UPDATE cache SET deleted_at = ?1 WHERE id = ?2";
-    conn.execute(sql, (now, cache_id))
-        .await
-        .map_err(db_err)?;
+    conn.execute(sql, (now, cache_id)).await.map_err(db_err)?;
     Ok(())
 }
 

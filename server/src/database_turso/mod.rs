@@ -148,7 +148,13 @@ impl AtticDatabase for Arc<TursoConnection> {
         store_path_hash: &StorePathHash,
         include_chunks: bool,
     ) -> ServerResult<(ObjectModel, CacheModel, NarModel, Vec<Option<ChunkModel>>)> {
-        queries::find_object_and_chunks_by_store_path_hash(self, cache, store_path_hash, include_chunks).await
+        queries::find_object_and_chunks_by_store_path_hash(
+            self,
+            cache,
+            store_path_hash,
+            include_chunks,
+        )
+        .await
     }
 
     async fn find_cache(&self, cache: &CacheName) -> ServerResult<CacheModel> {
