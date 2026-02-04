@@ -191,7 +191,7 @@ async fn upload_path_dedup(
     }
 
     // Begin transaction
-    database
+    let txn = database
         .begin_transaction()
         .await
         .map_err(|e| ServerError::database_error(TursoDbError(e.to_string())))?;
@@ -227,13 +227,12 @@ async fn upload_path_dedup(
 
     match result {
         Ok(()) => {
-            database
-                .commit()
+            txn.commit()
                 .await
                 .map_err(|e| ServerError::database_error(TursoDbError(e.to_string())))?;
         }
         Err(e) => {
-            let _ = database.rollback().await;
+            let _ = txn.rollback().await;
             return Err(e);
         }
     }
@@ -399,7 +398,7 @@ async fn upload_path_new_chunked(
             });
 
     // Begin transaction for final updates
-    database
+    let txn = database
         .begin_transaction()
         .await
         .map_err(|e| ServerError::database_error(TursoDbError(e.to_string())))?;
@@ -442,13 +441,12 @@ async fn upload_path_new_chunked(
 
     match result {
         Ok(()) => {
-            database
-                .commit()
+            txn.commit()
                 .await
                 .map_err(|e| ServerError::database_error(TursoDbError(e.to_string())))?;
         }
         Err(e) => {
-            let _ = database.rollback().await;
+            let _ = txn.rollback().await;
             return Err(e);
         }
     }
@@ -498,7 +496,7 @@ async fn upload_path_new_unchunked(
     let file_size = chunk.guard.file_size.unwrap() as usize;
 
     // Begin transaction
-    database
+    let txn = database
         .begin_transaction()
         .await
         .map_err(|e| ServerError::database_error(TursoDbError(e.to_string())))?;
@@ -554,13 +552,12 @@ async fn upload_path_new_unchunked(
 
     match result {
         Ok(()) => {
-            database
-                .commit()
+            txn.commit()
                 .await
                 .map_err(|e| ServerError::database_error(TursoDbError(e.to_string())))?;
         }
         Err(e) => {
-            let _ = database.rollback().await;
+            let _ = txn.rollback().await;
             return Err(e);
         }
     }
@@ -681,7 +678,7 @@ async fn upload_chunk(
     }
 
     // Begin transaction
-    database
+    let txn = database
         .begin_transaction()
         .await
         .map_err(|e| ServerError::database_error(TursoDbError(e.to_string())))?;
@@ -716,8 +713,7 @@ async fn upload_chunk(
 
     match result {
         Ok(chunk) => {
-            database
-                .commit()
+            txn.commit()
                 .await
                 .map_err(|e| ServerError::database_error(TursoDbError(e.to_string())))?;
 
@@ -731,7 +727,7 @@ async fn upload_chunk(
             })
         }
         Err(e) => {
-            let _ = database.rollback().await;
+            let _ = txn.rollback().await;
             Err(e)
         }
     }

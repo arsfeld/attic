@@ -14,17 +14,29 @@
 )]
 
 pub mod access;
+#[cfg(not(test))]
 mod api;
+#[cfg(test)]
+pub(crate) mod api;
 mod compression;
 pub mod config;
 pub mod database;
 pub mod error;
 pub mod gc;
+#[cfg(not(test))]
 mod middleware;
+#[cfg(test)]
+pub(crate) mod middleware;
 mod narinfo;
 pub mod nix_manifest;
 pub mod oobe;
+#[cfg(not(test))]
 mod storage;
+#[cfg(test)]
+pub(crate) mod storage;
+
+#[cfg(test)]
+mod tests;
 
 use std::future::IntoFuture;
 use std::net::SocketAddr;

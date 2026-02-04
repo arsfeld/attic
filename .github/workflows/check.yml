@@ -1,11 +1,11 @@
-name: Lint
+name: Check
 
 on:
   pull_request:
   push:
 jobs:
-  lint:
-    name: Lint
+  check:
+    name: Check
 
     runs-on: ubuntu-latest
 
@@ -31,3 +31,6 @@ jobs:
 
       - name: Check rustfmt
         run: .ci/run just ci-rustfmt
+
+      - name: Run tests
+        run: .ci/run cargo test --workspace

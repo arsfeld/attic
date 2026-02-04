@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use libsql::{params::IntoParams, Builder, Connection, Database};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 
 use crate::config::DatabaseConfig;
 
@@ -50,6 +50,56 @@ pub struct TursoConnection {
     database: Database,
     connection: RwLock<Connection>,
     config: TursoConfig,
+    /// Mutex to serialize transaction operations.
+    /// SQLite/libsql connections only support one active transaction at a time,
+    /// so we need to ensure only one transaction is active across all concurrent requests.
+    transaction_lock: Arc<Mutex<()>>,
+}
+
+/// A guard that holds a database transaction and releases the lock when dropped.
+///
+/// This ensures that only one transaction can be active at a time on the connection.
+/// The transaction is automatically rolled back if not explicitly committed.
+pub struct TransactionGuard {
+    connection: Arc<TursoConnection>,
+    _guard: OwnedMutexGuard<()>,
+    committed: bool,
+}
+
+impl TransactionGuard {
+    /// Commits the transaction.
+    pub async fn commit(mut self) -> Result<()> {
+        self.connection.execute("COMMIT", ()).await?;
+        self.committed = true;
+        Ok(())
+    }
+
+    /// Rolls back the transaction.
+    pub async fn rollback(mut self) -> Result<()> {
+        self.connection.execute("ROLLBACK", ()).await?;
+        self.committed = true; // Mark as handled so Drop doesn't try to rollback again
+        Ok(())
+    }
+
+    /// Returns a reference to the underlying connection for executing queries within the transaction.
+    pub fn connection(&self) -> &Arc<TursoConnection> {
+        &self.connection
+    }
+}
+
+impl Drop for TransactionGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            // Transaction was not committed, we should rollback.
+            // Since we can't do async in Drop, we spawn a task.
+            let connection = self.connection.clone();
+            tokio::spawn(async move {
+                if let Err(e) = connection.execute("ROLLBACK", ()).await {
+                    tracing::warn!("Failed to rollback transaction on drop: {}", e);
+                }
+            });
+        }
+    }
 }
 
 impl std::fmt::Debug for TursoConnection {
@@ -132,6 +182,7 @@ impl TursoConnection {
             database,
             connection: RwLock::new(connection),
             config,
+            transaction_lock: Arc::new(Mutex::new(())),
         }))
     }
 
@@ -175,22 +226,19 @@ impl TursoConnection {
         &self.config
     }
 
-    /// Begins a transaction.
-    pub async fn begin_transaction(&self) -> Result<()> {
+    /// Begins a transaction and returns a guard that ensures proper serialization.
+    ///
+    /// Only one transaction can be active at a time on the connection.
+    /// The guard must be used to commit or rollback the transaction.
+    /// If the guard is dropped without committing, the transaction is rolled back.
+    pub async fn begin_transaction(self: &Arc<Self>) -> Result<TransactionGuard> {
+        let guard = Arc::clone(&self.transaction_lock).lock_owned().await;
         self.execute("BEGIN IMMEDIATE", ()).await?;
-        Ok(())
-    }
-
-    /// Commits the current transaction.
-    pub async fn commit(&self) -> Result<()> {
-        self.execute("COMMIT", ()).await?;
-        Ok(())
-    }
-
-    /// Rolls back the current transaction.
-    pub async fn rollback(&self) -> Result<()> {
-        self.execute("ROLLBACK", ()).await?;
-        Ok(())
+        Ok(TransactionGuard {
+            connection: Arc::clone(self),
+            _guard: guard,
+            committed: false,
+        })
     }
 }
 
@@ -442,14 +490,14 @@ mod tests {
         .expect("Create table failed");
 
         // Start transaction
-        conn.begin_transaction().await.expect("Begin failed");
+        let txn = conn.begin_transaction().await.expect("Begin failed");
 
         conn.execute("INSERT INTO test_table (value) VALUES (?1)", ["in-txn"])
             .await
             .expect("Insert failed");
 
         // Commit
-        conn.commit().await.expect("Commit failed");
+        txn.commit().await.expect("Commit failed");
 
         // Verify data persisted
         let mut rows = conn
@@ -478,14 +526,14 @@ mod tests {
             .expect("Insert failed");
 
         // Start transaction
-        conn.begin_transaction().await.expect("Begin failed");
+        let txn = conn.begin_transaction().await.expect("Begin failed");
 
         conn.execute("INSERT INTO test_table (value) VALUES (?1)", ["in-txn"])
             .await
             .expect("Insert failed");
 
         // Rollback
-        conn.rollback().await.expect("Rollback failed");
+        txn.rollback().await.expect("Rollback failed");
 
         // Verify only pre-txn data exists
         let mut rows = conn

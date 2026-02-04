@@ -1785,62 +1785,41 @@ mod tests {
         assert_eq!(chunks.len(), 1);
     }
 
-    /// Test transaction commit without active transaction.
-    /// BUG: Calling commit() when no transaction is active causes
-    /// "SQLite error: cannot commit - no transaction is active"
+    /// Test that transactions are properly serialized with the TransactionGuard.
+    /// The guard ensures only one transaction can be active at a time via a mutex.
     #[tokio::test]
-    async fn test_commit_without_transaction() {
-        let (conn, _temp_dir) = create_test_db().await;
-
-        // Try to commit without starting a transaction
-        let result = conn.commit().await;
-
-        // This should fail with "cannot commit - no transaction is active"
-        // If it succeeds, that's also acceptable (libSQL might handle this gracefully)
-        if let Err(e) = &result {
-            let err_str = e.to_string().to_lowercase();
-            assert!(
-                err_str.contains("no transaction") || err_str.contains("not in a transaction"),
-                "Expected 'no transaction' error, got: {}",
-                e
-            );
-        }
-    }
-
-    /// Test nested transactions.
-    /// BUG: Starting a transaction when one is already active causes
-    /// "SQLite error: cannot start a transaction within a transaction"
-    #[tokio::test]
-    async fn test_nested_transaction_error() {
+    async fn test_transaction_serialization() {
         let (conn, _temp_dir) = create_test_db().await;
 
         // Start first transaction
-        conn.begin_transaction()
+        let txn1 = conn
+            .begin_transaction()
             .await
             .expect("First transaction should start");
 
-        // Try to start another transaction - this should fail
-        let result = conn.begin_transaction().await;
+        // Spawn a task that tries to start another transaction
+        // It should block waiting for the mutex, not fail
+        let conn_clone = conn.clone();
+        let handle = tokio::spawn(async move {
+            // This will wait for txn1 to complete before starting
+            let txn2 = conn_clone
+                .begin_transaction()
+                .await
+                .expect("Second transaction should eventually start");
+            txn2.commit().await.expect("Second commit should succeed");
+        });
 
-        // Clean up - rollback the first transaction
-        let _ = conn.rollback().await;
+        // Give the spawned task time to start waiting on the mutex
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        // The second begin_transaction should have failed
-        assert!(
-            result.is_err(),
-            "Nested transaction should fail, but it succeeded"
-        );
+        // Commit the first transaction, which should unblock the second
+        txn1.commit().await.expect("First commit should succeed");
 
-        if let Err(e) = result {
-            let err_str = e.to_string().to_lowercase();
-            assert!(
-                err_str.contains("within a transaction")
-                    || err_str.contains("nested")
-                    || err_str.contains("already"),
-                "Expected nested transaction error, got: {}",
-                e
-            );
-        }
+        // Wait for the second transaction to complete
+        tokio::time::timeout(tokio::time::Duration::from_secs(5), handle)
+            .await
+            .expect("Second transaction should complete within timeout")
+            .expect("Second transaction task should succeed");
     }
 
     /// Test the full upload flow simulation.
@@ -1868,7 +1847,8 @@ mod tests {
         .expect("Insert chunk failed");
 
         // Begin transaction for final updates
-        conn.begin_transaction()
+        let txn = conn
+            .begin_transaction()
             .await
             .expect("Begin transaction failed");
 
@@ -1922,11 +1902,11 @@ mod tests {
         match object_result {
             Ok(_) => {
                 // Commit should succeed
-                conn.commit().await.expect("Commit failed");
+                txn.commit().await.expect("Commit failed");
             }
             Err(e) => {
                 // Rollback and fail the test
-                let _ = conn.rollback().await;
+                let _ = txn.rollback().await;
                 panic!("insert_object_upsert failed: {:?}", e);
             }
         }

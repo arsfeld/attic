@@ -24,6 +24,14 @@ pub struct LocalStorageConfig {
     path: PathBuf,
 }
 
+impl LocalStorageConfig {
+    /// Creates a new LocalStorageConfig for testing purposes.
+    #[cfg(test)]
+    pub fn new_for_test(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
 /// Reference to a file in local storage.
 ///
 /// We still call it "remote file" for consistency :)
