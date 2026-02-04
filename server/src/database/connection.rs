@@ -193,3 +193,454 @@ impl TursoConnection {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    // ==================== TursoConfig Tests ====================
+
+    #[test]
+    fn test_is_remote_libsql_url() {
+        let config = TursoConfig {
+            url: "libsql://my-db.turso.io".to_string(),
+            auth_token: Some("token".to_string()),
+            local_replica_path: None,
+            sync_interval: Duration::from_secs(60),
+        };
+        assert!(config.is_remote());
+    }
+
+    #[test]
+    fn test_is_remote_https_url() {
+        let config = TursoConfig {
+            url: "https://my-db.turso.io".to_string(),
+            auth_token: Some("token".to_string()),
+            local_replica_path: None,
+            sync_interval: Duration::from_secs(60),
+        };
+        assert!(config.is_remote());
+    }
+
+    #[test]
+    fn test_is_not_remote_sqlite_url() {
+        let config = TursoConfig {
+            url: "sqlite:///path/to/db.sqlite".to_string(),
+            auth_token: None,
+            local_replica_path: None,
+            sync_interval: Duration::from_secs(60),
+        };
+        assert!(!config.is_remote());
+    }
+
+    #[test]
+    fn test_is_not_remote_sqlite_short_url() {
+        let config = TursoConfig {
+            url: "sqlite:/path/to/db.sqlite".to_string(),
+            auth_token: None,
+            local_replica_path: None,
+            sync_interval: Duration::from_secs(60),
+        };
+        assert!(!config.is_remote());
+    }
+
+    #[test]
+    fn test_is_not_remote_plain_path() {
+        let config = TursoConfig {
+            url: "/path/to/db.sqlite".to_string(),
+            auth_token: None,
+            local_replica_path: None,
+            sync_interval: Duration::from_secs(60),
+        };
+        assert!(!config.is_remote());
+    }
+
+    #[test]
+    fn test_is_not_remote_memory_db() {
+        let config = TursoConfig {
+            url: ":memory:".to_string(),
+            auth_token: None,
+            local_replica_path: None,
+            sync_interval: Duration::from_secs(60),
+        };
+        assert!(!config.is_remote());
+    }
+
+    #[test]
+    fn test_config_with_embedded_replica() {
+        let config = TursoConfig {
+            url: "libsql://my-db.turso.io".to_string(),
+            auth_token: Some("token".to_string()),
+            local_replica_path: Some(PathBuf::from("/tmp/replica.db")),
+            sync_interval: Duration::from_secs(30),
+        };
+        assert!(config.is_remote());
+        assert!(config.local_replica_path.is_some());
+        assert_eq!(config.sync_interval, Duration::from_secs(30));
+    }
+
+    // ==================== TursoConnection Tests ====================
+
+    /// Helper to create a temporary database for testing.
+    async fn create_temp_db() -> (Arc<TursoConnection>, TempDir) {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let db_path = temp_dir.path().join("test.db");
+
+        let config = TursoConfig {
+            url: format!("sqlite://{}", db_path.display()),
+            auth_token: None,
+            local_replica_path: None,
+            sync_interval: Duration::from_secs(60),
+        };
+
+        let conn = TursoConnection::connect(config)
+            .await
+            .expect("Failed to connect");
+        (conn, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn test_connect_local_sqlite() {
+        let (conn, _temp_dir) = create_temp_db().await;
+
+        // Verify connection is usable with a query (execute returns row count, not results)
+        let mut rows = conn.query("SELECT 1", ()).await.expect("Query failed");
+        assert!(rows.next().await.expect("Next failed").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_connect_memory_database() {
+        let config = TursoConfig {
+            url: ":memory:".to_string(),
+            auth_token: None,
+            local_replica_path: None,
+            sync_interval: Duration::from_secs(60),
+        };
+
+        let conn = TursoConnection::connect(config)
+            .await
+            .expect("Failed to connect to memory db");
+
+        // Verify connection is usable with a query
+        let mut rows = conn.query("SELECT 1", ()).await.expect("Query failed");
+        assert!(rows.next().await.expect("Next failed").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_remote_connection_requires_auth_token() {
+        let config = TursoConfig {
+            url: "libsql://test.turso.io".to_string(),
+            auth_token: None, // Missing auth token
+            local_replica_path: None,
+            sync_interval: Duration::from_secs(60),
+        };
+
+        let result = TursoConnection::connect(config).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("auth_token is required"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_create_table() {
+        let (conn, _temp_dir) = create_temp_db().await;
+
+        let result = conn
+            .execute(
+                "CREATE TABLE test_table (id INTEGER PRIMARY KEY, name TEXT)",
+                (),
+            )
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_insert_and_count() {
+        let (conn, _temp_dir) = create_temp_db().await;
+
+        conn.execute(
+            "CREATE TABLE test_table (id INTEGER PRIMARY KEY, name TEXT)",
+            (),
+        )
+        .await
+        .expect("Create table failed");
+
+        // Insert a row
+        let affected = conn
+            .execute("INSERT INTO test_table (name) VALUES (?1)", ["Alice"])
+            .await
+            .expect("Insert failed");
+        assert_eq!(affected, 1);
+
+        // Insert multiple rows
+        conn.execute("INSERT INTO test_table (name) VALUES (?1)", ["Bob"])
+            .await
+            .expect("Insert failed");
+        conn.execute("INSERT INTO test_table (name) VALUES (?1)", ["Charlie"])
+            .await
+            .expect("Insert failed");
+
+        // Query count
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM test_table", ())
+            .await
+            .expect("Query failed");
+        let row = rows.next().await.expect("Next failed").expect("No row");
+        let count: i64 = row.get(0).expect("Get failed");
+        assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_query_with_parameters() {
+        let (conn, _temp_dir) = create_temp_db().await;
+
+        conn.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)",
+            (),
+        )
+        .await
+        .expect("Create table failed");
+
+        conn.execute(
+            "INSERT INTO users (name, age) VALUES (?1, ?2)",
+            ("Alice", 30),
+        )
+        .await
+        .expect("Insert failed");
+
+        conn.execute("INSERT INTO users (name, age) VALUES (?1, ?2)", ("Bob", 25))
+            .await
+            .expect("Insert failed");
+
+        // Query with parameter
+        let mut rows = conn
+            .query("SELECT name, age FROM users WHERE age > ?1", [26])
+            .await
+            .expect("Query failed");
+
+        let row = rows.next().await.expect("Next failed").expect("No row");
+        let name: String = row.get(0).expect("Get name failed");
+        let age: i64 = row.get(1).expect("Get age failed");
+
+        assert_eq!(name, "Alice");
+        assert_eq!(age, 30);
+
+        // Should be no more rows
+        assert!(rows.next().await.expect("Next failed").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_transaction_commit() {
+        let (conn, _temp_dir) = create_temp_db().await;
+
+        conn.execute(
+            "CREATE TABLE test_table (id INTEGER PRIMARY KEY, value TEXT)",
+            (),
+        )
+        .await
+        .expect("Create table failed");
+
+        // Start transaction
+        conn.begin_transaction().await.expect("Begin failed");
+
+        conn.execute("INSERT INTO test_table (value) VALUES (?1)", ["in-txn"])
+            .await
+            .expect("Insert failed");
+
+        // Commit
+        conn.commit().await.expect("Commit failed");
+
+        // Verify data persisted
+        let mut rows = conn
+            .query("SELECT value FROM test_table", ())
+            .await
+            .expect("Query failed");
+        let row = rows.next().await.expect("Next failed").expect("No row");
+        let value: String = row.get(0).expect("Get failed");
+        assert_eq!(value, "in-txn");
+    }
+
+    #[tokio::test]
+    async fn test_transaction_rollback() {
+        let (conn, _temp_dir) = create_temp_db().await;
+
+        conn.execute(
+            "CREATE TABLE test_table (id INTEGER PRIMARY KEY, value TEXT)",
+            (),
+        )
+        .await
+        .expect("Create table failed");
+
+        // Insert initial data outside transaction
+        conn.execute("INSERT INTO test_table (value) VALUES (?1)", ["before"])
+            .await
+            .expect("Insert failed");
+
+        // Start transaction
+        conn.begin_transaction().await.expect("Begin failed");
+
+        conn.execute("INSERT INTO test_table (value) VALUES (?1)", ["in-txn"])
+            .await
+            .expect("Insert failed");
+
+        // Rollback
+        conn.rollback().await.expect("Rollback failed");
+
+        // Verify only pre-txn data exists
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM test_table", ())
+            .await
+            .expect("Query failed");
+        let row = rows.next().await.expect("Next failed").expect("No row");
+        let count: i64 = row.get(0).expect("Get failed");
+        assert_eq!(count, 1); // Only "before" row should exist
+    }
+
+    #[tokio::test]
+    async fn test_config_accessor() {
+        let (conn, _temp_dir) = create_temp_db().await;
+
+        let config = conn.config();
+        assert!(!config.is_remote());
+        assert!(config.auth_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_sync_noop_for_local() {
+        let (conn, _temp_dir) = create_temp_db().await;
+
+        // sync() should be a no-op for local databases
+        let result = conn.sync().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_conn_read_access() {
+        let (conn, _temp_dir) = create_temp_db().await;
+
+        conn.execute("CREATE TABLE test_table (id INTEGER PRIMARY KEY)", ())
+            .await
+            .expect("Create failed");
+
+        // Use conn() for read access
+        let guard = conn.conn().await;
+        let mut rows = guard
+            .query("SELECT 1", ())
+            .await
+            .expect("Query via guard failed");
+        assert!(rows.next().await.expect("Next failed").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_url_prefix_stripping() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let db_path = temp_dir.path().join("test.db");
+
+        // Test with sqlite:// prefix
+        let config1 = TursoConfig {
+            url: format!("sqlite://{}", db_path.display()),
+            auth_token: None,
+            local_replica_path: None,
+            sync_interval: Duration::from_secs(60),
+        };
+        let conn1 = TursoConnection::connect(config1).await;
+        assert!(conn1.is_ok());
+        drop(conn1);
+
+        // Clean up and test with sqlite: prefix (single slash)
+        let db_path2 = temp_dir.path().join("test2.db");
+        let config2 = TursoConfig {
+            url: format!("sqlite:{}", db_path2.display()),
+            auth_token: None,
+            local_replica_path: None,
+            sync_interval: Duration::from_secs(60),
+        };
+        let conn2 = TursoConnection::connect(config2).await;
+        assert!(conn2.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_wal_mode_enabled_for_local() {
+        let (conn, _temp_dir) = create_temp_db().await;
+
+        // Check that WAL mode was set
+        let mut rows = conn
+            .query("PRAGMA journal_mode", ())
+            .await
+            .expect("PRAGMA query failed");
+        let row = rows.next().await.expect("Next failed").expect("No row");
+        let mode: String = row.get(0).expect("Get failed");
+        assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    #[tokio::test]
+    async fn test_debug_formatting() {
+        let (conn, _temp_dir) = create_temp_db().await;
+
+        let debug_str = format!("{:?}", conn);
+        assert!(debug_str.contains("TursoConnection"));
+        assert!(debug_str.contains("config"));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_reads() {
+        let (conn, _temp_dir) = create_temp_db().await;
+
+        conn.execute(
+            "CREATE TABLE test_table (id INTEGER PRIMARY KEY, value INTEGER)",
+            (),
+        )
+        .await
+        .expect("Create failed");
+
+        for i in 0..10 {
+            conn.execute("INSERT INTO test_table (value) VALUES (?1)", [i])
+                .await
+                .expect("Insert failed");
+        }
+
+        // Spawn multiple concurrent read tasks
+        let conn_clone = conn.clone();
+        let handles: Vec<_> = (0..5)
+            .map(|_| {
+                let c = conn_clone.clone();
+                tokio::spawn(async move {
+                    let mut rows = c
+                        .query("SELECT SUM(value) FROM test_table", ())
+                        .await
+                        .expect("Query failed");
+                    let row = rows.next().await.expect("Next failed").expect("No row");
+                    let sum: i64 = row.get(0).expect("Get failed");
+                    sum
+                })
+            })
+            .collect();
+
+        // All should return the same sum (0+1+2+...+9 = 45)
+        for handle in handles {
+            let sum = handle.await.expect("Task failed");
+            assert_eq!(sum, 45);
+        }
+    }
+
+    // ==================== Error Handling Tests ====================
+
+    #[tokio::test]
+    async fn test_query_error_invalid_sql() {
+        let (conn, _temp_dir) = create_temp_db().await;
+
+        let result = conn.query("INVALID SQL SYNTAX", ()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_execute_error_invalid_table() {
+        let (conn, _temp_dir) = create_temp_db().await;
+
+        let result = conn
+            .execute("INSERT INTO nonexistent_table (col) VALUES (1)", ())
+            .await;
+        assert!(result.is_err());
+    }
+}

@@ -327,6 +327,9 @@ pub struct MigrationStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::connection::TursoConfig;
+    use std::time::Duration;
+    use tempfile::TempDir;
 
     #[test]
     fn test_migrations_have_unique_names() {
@@ -347,5 +350,266 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Helper to create a temporary database for testing.
+    async fn create_test_db() -> (std::sync::Arc<TursoConnection>, TempDir) {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let db_path = temp_dir.path().join("test.db");
+
+        let config = TursoConfig {
+            url: format!("sqlite://{}", db_path.display()),
+            auth_token: None,
+            local_replica_path: None,
+            sync_interval: Duration::from_secs(60),
+        };
+
+        let conn = TursoConnection::connect(config)
+            .await
+            .expect("Failed to connect");
+        (conn, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn test_run_migrations_fresh_db() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        // Run migrations on fresh database
+        let result = run_migrations(&conn).await;
+        assert!(result.is_ok(), "Migrations failed: {:?}", result.err());
+
+        // Verify all tables exist
+        let tables = ["cache", "nar", "object", "chunk", "chunkref", "_migrations"];
+        for table in tables {
+            let mut rows = conn
+                .query(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                )
+                .await
+                .expect("Query failed");
+            assert!(
+                rows.next().await.expect("Next failed").is_some(),
+                "Table {} should exist",
+                table
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_migrations_idempotent() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        // Run migrations twice
+        run_migrations(&conn).await.expect("First run failed");
+        let result = run_migrations(&conn).await;
+        assert!(
+            result.is_ok(),
+            "Second run should be idempotent: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_needs_migration_fresh_db() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        // Fresh database should need migrations
+        let needs = needs_migration(&conn).await.expect("Check failed");
+        assert!(needs, "Fresh database should need migrations");
+    }
+
+    #[tokio::test]
+    async fn test_needs_migration_after_running() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        // Run all migrations
+        run_migrations(&conn).await.expect("Migrations failed");
+
+        // Should not need migrations anymore
+        let needs = needs_migration(&conn).await.expect("Check failed");
+        assert!(!needs, "Migrated database should not need migrations");
+    }
+
+    #[tokio::test]
+    async fn test_get_migration_status_fresh_db() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        let status = get_migration_status(&conn).await.expect("Status failed");
+
+        assert_eq!(status.applied.len(), 0);
+        assert_eq!(status.pending.len(), MIGRATIONS.len());
+        assert_eq!(status.total, MIGRATIONS.len());
+    }
+
+    #[tokio::test]
+    async fn test_get_migration_status_after_running() {
+        let (conn, _temp_dir) = create_test_db().await;
+
+        run_migrations(&conn).await.expect("Migrations failed");
+
+        let status = get_migration_status(&conn).await.expect("Status failed");
+
+        assert_eq!(status.applied.len(), MIGRATIONS.len());
+        assert_eq!(status.pending.len(), 0);
+        assert_eq!(status.total, MIGRATIONS.len());
+    }
+
+    #[tokio::test]
+    async fn test_migrations_create_proper_schema() {
+        let (conn, _temp_dir) = create_test_db().await;
+        run_migrations(&conn).await.expect("Migrations failed");
+
+        // Test cache table columns
+        let result = conn
+            .execute(
+                r#"INSERT INTO cache (name, keypair, is_public, store_dir, priority, upstream_cache_key_names, created_at)
+                   VALUES ('test', 'keypair', 1, '/nix/store', 40, '[]', datetime('now'))"#,
+                (),
+            )
+            .await;
+        assert!(result.is_ok(), "Cache insert failed: {:?}", result.err());
+
+        // Test nar table columns
+        let result = conn
+            .execute(
+                r#"INSERT INTO nar (state, nar_hash, nar_size, compression, num_chunks, completeness_hint, holders_count, created_at)
+                   VALUES ('V', 'sha256:abc123', 1000, 'none', 1, 1, 0, datetime('now'))"#,
+                (),
+            )
+            .await;
+        assert!(result.is_ok(), "NAR insert failed: {:?}", result.err());
+
+        // Test object table columns (including last_accessed_at and created_by from migrations)
+        let result = conn
+            .execute(
+                r#"INSERT INTO object (cache_id, nar_id, store_path_hash, store_path, "references", sigs, created_at, last_accessed_at, created_by)
+                   VALUES (1, 1, 'abc123', '/nix/store/abc123-pkg', '[]', '[]', datetime('now'), datetime('now'), 'test-user')"#,
+                (),
+            )
+            .await;
+        assert!(result.is_ok(), "Object insert failed: {:?}", result.err());
+
+        // Test chunk table columns
+        let result = conn
+            .execute(
+                r#"INSERT INTO chunk (state, chunk_hash, chunk_size, compression, remote_file, remote_file_id, holders_count, created_at)
+                   VALUES ('V', 'sha256:chunk1', 500, 'zstd', 'chunks/chunk1.zst', 'chunk-uuid-1', 0, datetime('now'))"#,
+                (),
+            )
+            .await;
+        assert!(result.is_ok(), "Chunk insert failed: {:?}", result.err());
+
+        // Test chunkref table columns
+        let result = conn
+            .execute(
+                r#"INSERT INTO chunkref (nar_id, seq, chunk_id, chunk_hash, compression)
+                   VALUES (1, 0, 1, 'sha256:chunk1', 'zstd')"#,
+                (),
+            )
+            .await;
+        assert!(result.is_ok(), "Chunkref insert failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_cache_retention_period_column_exists() {
+        let (conn, _temp_dir) = create_test_db().await;
+        run_migrations(&conn).await.expect("Migrations failed");
+
+        // Verify retention_period column exists (added in m20221227_000005)
+        let result = conn
+            .execute(
+                "UPDATE cache SET retention_period = 86400 WHERE name = 'nonexistent'",
+                (),
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "retention_period column should exist: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_indexes_created() {
+        let (conn, _temp_dir) = create_test_db().await;
+        run_migrations(&conn).await.expect("Migrations failed");
+
+        // Query for indexes
+        let mut rows = conn
+            .query(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'",
+                (),
+            )
+            .await
+            .expect("Query failed");
+
+        let mut indexes = Vec::new();
+        while let Some(row) = rows.next().await.expect("Next failed") {
+            let name: String = row.get(0).expect("Get failed");
+            indexes.push(name);
+        }
+
+        // Verify expected indexes exist
+        assert!(
+            indexes.contains(&"idx_cache_name".to_string()),
+            "idx_cache_name should exist"
+        );
+        assert!(
+            indexes.contains(&"idx_nar_nar_hash".to_string()),
+            "idx_nar_nar_hash should exist"
+        );
+        assert!(
+            indexes.contains(&"idx_chunk_chunk_hash".to_string()),
+            "idx_chunk_chunk_hash should exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_foreign_keys_work() {
+        let (conn, _temp_dir) = create_test_db().await;
+        run_migrations(&conn).await.expect("Migrations failed");
+
+        // Enable foreign key checks
+        conn.execute("PRAGMA foreign_keys = ON", ())
+            .await
+            .expect("PRAGMA failed");
+
+        // Insert parent records
+        conn.execute(
+            r#"INSERT INTO cache (name, keypair, is_public, store_dir, priority, upstream_cache_key_names, created_at)
+               VALUES ('test-cache', 'keypair', 1, '/nix/store', 40, '[]', datetime('now'))"#,
+            (),
+        )
+        .await
+        .expect("Cache insert failed");
+
+        conn.execute(
+            r#"INSERT INTO nar (state, nar_hash, nar_size, compression, num_chunks, completeness_hint, holders_count, created_at)
+               VALUES ('V', 'sha256:abc', 1000, 'none', 1, 1, 0, datetime('now'))"#,
+            (),
+        )
+        .await
+        .expect("NAR insert failed");
+
+        // Insert child record referencing parents
+        let result = conn
+            .execute(
+                r#"INSERT INTO object (cache_id, nar_id, store_path_hash, store_path, "references", sigs, created_at)
+                   VALUES (1, 1, 'hash123', '/nix/store/hash123-pkg', '[]', '[]', datetime('now'))"#,
+                (),
+            )
+            .await;
+        assert!(result.is_ok(), "Object with valid FKs should work");
+
+        // Try to insert with invalid foreign key
+        let result = conn
+            .execute(
+                r#"INSERT INTO object (cache_id, nar_id, store_path_hash, store_path, "references", sigs, created_at)
+                   VALUES (999, 999, 'hash456', '/nix/store/hash456-pkg', '[]', '[]', datetime('now'))"#,
+                (),
+            )
+            .await;
+        assert!(result.is_err(), "Object with invalid FKs should fail");
     }
 }
