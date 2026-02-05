@@ -12,7 +12,10 @@ use attic::hash::Hash;
 use attic::nix_store::StorePathHash;
 
 use super::connection::TursoConnection;
-use super::models::{CacheModel, ChunkModel, ChunkState, NarModel, NarState, ObjectModel};
+use super::models::{
+    CacheModel, ChunkModel, ChunkState, CredentialModel, NarModel, NarState, ObjectModel,
+    SessionModel, UserCachePermissionModel, UserModel,
+};
 use super::{ChunkGuard, NarGuard};
 
 /// A simple error type for database operations that implements StdError.
@@ -36,7 +39,8 @@ fn db_err<E: std::fmt::Display>(e: E) -> ServerError {
 pub async fn find_cache(conn: &TursoConnection, cache: &CacheName) -> ServerResult<CacheModel> {
     let sql = r#"
         SELECT id, name, keypair, is_public, store_dir, priority,
-               upstream_cache_key_names, created_at, deleted_at, retention_period
+               upstream_cache_key_names, created_at, deleted_at, retention_period,
+               created_by_user_id
         FROM cache
         WHERE name = ?1 AND deleted_at IS NULL
     "#;
@@ -76,6 +80,7 @@ async fn find_object_without_chunks(
             o.created_at, o.last_accessed_at, o.created_by,
             c.id, c.name, c.keypair, c.is_public, c.store_dir, c.priority,
             c.upstream_cache_key_names, c.created_at, c.deleted_at, c.retention_period,
+            c.created_by_user_id,
             n.id, n.state, n.nar_hash, n.nar_size, n.compression,
             n.num_chunks, n.completeness_hint, n.holders_count, n.created_at
         FROM object o
@@ -124,6 +129,7 @@ async fn find_object_with_chunks(
             o.created_at, o.last_accessed_at, o.created_by,
             c.id, c.name, c.keypair, c.is_public, c.store_dir, c.priority,
             c.upstream_cache_key_names, c.created_at, c.deleted_at, c.retention_period,
+            c.created_by_user_id,
             n.id, n.state, n.nar_hash, n.nar_size, n.compression,
             n.num_chunks, n.completeness_hint, n.holders_count, n.created_at,
             ch.id, ch.state, ch.chunk_hash, ch.chunk_size, ch.file_hash,
@@ -296,16 +302,41 @@ pub async fn create_cache(
     priority: i32,
     upstream_cache_key_names: &[String],
 ) -> ServerResult<CacheModel> {
+    create_cache_with_owner(
+        conn,
+        name,
+        keypair,
+        is_public,
+        store_dir,
+        priority,
+        upstream_cache_key_names,
+        None,
+    )
+    .await
+}
+
+/// Creates a new cache with an optional owner (created_by_user_id).
+pub async fn create_cache_with_owner(
+    conn: &TursoConnection,
+    name: &str,
+    keypair: &str,
+    is_public: bool,
+    store_dir: &str,
+    priority: i32,
+    upstream_cache_key_names: &[String],
+    created_by_user_id: Option<i64>,
+) -> ServerResult<CacheModel> {
     let now = Utc::now().to_rfc3339();
     let upstream_json = serde_json::to_string(upstream_cache_key_names).map_err(db_err)?;
     let is_public_i64 = if is_public { 1i64 } else { 0i64 };
 
     let sql = r#"
         INSERT INTO cache (name, keypair, is_public, store_dir, priority,
-                          upstream_cache_key_names, created_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                          upstream_cache_key_names, created_at, created_by_user_id)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         RETURNING id, name, keypair, is_public, store_dir, priority,
-                  upstream_cache_key_names, created_at, deleted_at, retention_period
+                  upstream_cache_key_names, created_at, deleted_at, retention_period,
+                  created_by_user_id
     "#;
 
     let mut rows = conn
@@ -319,6 +350,7 @@ pub async fn create_cache(
                 priority as i64,
                 upstream_json.as_str(),
                 now.as_str(),
+                created_by_user_id,
             ),
         )
         .await
@@ -1092,13 +1124,38 @@ pub async fn insert_cache(
     priority: i32,
     upstream_cache_key_names: &str,
 ) -> ServerResult<u64> {
+    insert_cache_with_owner(
+        conn,
+        name,
+        keypair,
+        is_public,
+        store_dir,
+        priority,
+        upstream_cache_key_names,
+        None,
+    )
+    .await
+}
+
+/// Inserts a new cache with ON CONFLICT DO NOTHING and optional owner.
+/// Returns the number of rows inserted (0 if cache already exists).
+pub async fn insert_cache_with_owner(
+    conn: &TursoConnection,
+    name: &str,
+    keypair: &str,
+    is_public: bool,
+    store_dir: &str,
+    priority: i32,
+    upstream_cache_key_names: &str,
+    created_by_user_id: Option<i64>,
+) -> ServerResult<u64> {
     let now = Utc::now().to_rfc3339();
     let is_public_i64 = if is_public { 1i64 } else { 0i64 };
 
     let sql = r#"
         INSERT INTO cache (name, keypair, is_public, store_dir, priority,
-                          upstream_cache_key_names, created_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                          upstream_cache_key_names, created_at, created_by_user_id)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         ON CONFLICT(name) DO NOTHING
     "#;
 
@@ -1113,12 +1170,429 @@ pub async fn insert_cache(
                 priority as i64,
                 upstream_cache_key_names,
                 now.as_str(),
+                created_by_user_id,
             ),
         )
         .await
         .map_err(db_err)?;
 
     Ok(affected)
+}
+
+// ============================================================================
+// User management queries (for web UI authentication)
+// ============================================================================
+
+/// Finds a user by username.
+pub async fn find_user_by_username(
+    conn: &TursoConnection,
+    username: &str,
+) -> ServerResult<Option<UserModel>> {
+    let sql = r#"
+        SELECT id, username, display_name, is_admin, created_at, last_login_at
+        FROM user
+        WHERE username = ?1
+    "#;
+
+    let mut rows = conn.query(sql, [username]).await.map_err(db_err)?;
+
+    match rows.next().await.map_err(db_err)? {
+        Some(row) => Ok(Some(UserModel::from_row(&row).map_err(db_err)?)),
+        None => Ok(None),
+    }
+}
+
+/// Finds a user by ID.
+pub async fn find_user_by_id(conn: &TursoConnection, id: i64) -> ServerResult<Option<UserModel>> {
+    let sql = r#"
+        SELECT id, username, display_name, is_admin, created_at, last_login_at
+        FROM user
+        WHERE id = ?1
+    "#;
+
+    let mut rows = conn.query(sql, [id]).await.map_err(db_err)?;
+
+    match rows.next().await.map_err(db_err)? {
+        Some(row) => Ok(Some(UserModel::from_row(&row).map_err(db_err)?)),
+        None => Ok(None),
+    }
+}
+
+/// Creates a new user.
+pub async fn create_user(
+    conn: &TursoConnection,
+    username: &str,
+    display_name: Option<&str>,
+    is_admin: bool,
+) -> ServerResult<UserModel> {
+    let now = Utc::now().to_rfc3339();
+    let is_admin_i64 = if is_admin { 1i64 } else { 0i64 };
+
+    let sql = r#"
+        INSERT INTO user (username, display_name, is_admin, created_at)
+        VALUES (?1, ?2, ?3, ?4)
+        RETURNING id, username, display_name, is_admin, created_at, last_login_at
+    "#;
+
+    let mut rows = conn
+        .query(sql, (username, display_name, is_admin_i64, now.as_str()))
+        .await
+        .map_err(db_err)?;
+
+    match rows.next().await.map_err(db_err)? {
+        Some(row) => UserModel::from_row(&row).map_err(db_err),
+        None => Err(ErrorKind::DatabaseError(anyhow!("Failed to create user")).into()),
+    }
+}
+
+/// Lists all users.
+pub async fn list_users(conn: &TursoConnection) -> ServerResult<Vec<UserModel>> {
+    let sql = r#"
+        SELECT id, username, display_name, is_admin, created_at, last_login_at
+        FROM user
+        ORDER BY username ASC
+    "#;
+
+    let mut rows = conn.query(sql, ()).await.map_err(db_err)?;
+
+    let mut users = Vec::new();
+    while let Some(row) = rows.next().await.map_err(db_err)? {
+        users.push(UserModel::from_row(&row).map_err(db_err)?);
+    }
+
+    Ok(users)
+}
+
+/// Counts the total number of users.
+pub async fn count_users(conn: &TursoConnection) -> ServerResult<i64> {
+    let sql = "SELECT COUNT(*) FROM user";
+    let mut rows = conn.query(sql, ()).await.map_err(db_err)?;
+
+    match rows.next().await.map_err(db_err)? {
+        Some(row) => row.get::<i64>(0).map_err(db_err),
+        None => Ok(0),
+    }
+}
+
+/// Updates a user's last login timestamp.
+pub async fn update_user_last_login(conn: &TursoConnection, user_id: i64) -> ServerResult<()> {
+    let now = Utc::now().to_rfc3339();
+    let sql = "UPDATE user SET last_login_at = ?1 WHERE id = ?2";
+    conn.execute(sql, (now, user_id)).await.map_err(db_err)?;
+    Ok(())
+}
+
+/// Deletes a user by ID.
+pub async fn delete_user(conn: &TursoConnection, user_id: i64) -> ServerResult<()> {
+    let sql = "DELETE FROM user WHERE id = ?1";
+    conn.execute(sql, [user_id]).await.map_err(db_err)?;
+    Ok(())
+}
+
+// ============================================================================
+// Credential (passkey) queries
+// ============================================================================
+
+/// Finds all credentials for a user.
+pub async fn find_credentials_by_user(
+    conn: &TursoConnection,
+    user_id: i64,
+) -> ServerResult<Vec<CredentialModel>> {
+    let sql = r#"
+        SELECT id, user_id, credential_id, public_key, counter, name, created_at, last_used_at
+        FROM credential
+        WHERE user_id = ?1
+        ORDER BY created_at ASC
+    "#;
+
+    let mut rows = conn.query(sql, [user_id]).await.map_err(db_err)?;
+
+    let mut credentials = Vec::new();
+    while let Some(row) = rows.next().await.map_err(db_err)? {
+        credentials.push(CredentialModel::from_row(&row).map_err(db_err)?);
+    }
+
+    Ok(credentials)
+}
+
+/// Finds a credential by its WebAuthn credential ID.
+pub async fn find_credential_by_credential_id(
+    conn: &TursoConnection,
+    credential_id: &[u8],
+) -> ServerResult<Option<CredentialModel>> {
+    let sql = r#"
+        SELECT id, user_id, credential_id, public_key, counter, name, created_at, last_used_at
+        FROM credential
+        WHERE credential_id = ?1
+    "#;
+
+    let mut rows = conn.query(sql, [credential_id]).await.map_err(db_err)?;
+
+    match rows.next().await.map_err(db_err)? {
+        Some(row) => Ok(Some(CredentialModel::from_row(&row).map_err(db_err)?)),
+        None => Ok(None),
+    }
+}
+
+/// Creates a new credential.
+pub async fn create_credential(
+    conn: &TursoConnection,
+    user_id: i64,
+    credential_id: &[u8],
+    public_key: &[u8],
+    name: Option<&str>,
+) -> ServerResult<CredentialModel> {
+    let now = Utc::now().to_rfc3339();
+
+    let sql = r#"
+        INSERT INTO credential (user_id, credential_id, public_key, counter, name, created_at)
+        VALUES (?1, ?2, ?3, 0, ?4, ?5)
+        RETURNING id, user_id, credential_id, public_key, counter, name, created_at, last_used_at
+    "#;
+
+    let mut rows = conn
+        .query(
+            sql,
+            (user_id, credential_id, public_key, name, now.as_str()),
+        )
+        .await
+        .map_err(db_err)?;
+
+    match rows.next().await.map_err(db_err)? {
+        Some(row) => CredentialModel::from_row(&row).map_err(db_err),
+        None => Err(ErrorKind::DatabaseError(anyhow!("Failed to create credential")).into()),
+    }
+}
+
+/// Updates a credential's counter and last_used_at timestamp.
+pub async fn update_credential_counter(
+    conn: &TursoConnection,
+    id: i64,
+    counter: u32,
+) -> ServerResult<()> {
+    let now = Utc::now().to_rfc3339();
+    let sql = "UPDATE credential SET counter = ?1, last_used_at = ?2 WHERE id = ?3";
+    conn.execute(sql, (counter as i64, now, id))
+        .await
+        .map_err(db_err)?;
+    Ok(())
+}
+
+/// Deletes a credential by ID.
+pub async fn delete_credential(conn: &TursoConnection, id: i64) -> ServerResult<()> {
+    let sql = "DELETE FROM credential WHERE id = ?1";
+    conn.execute(sql, [id]).await.map_err(db_err)?;
+    Ok(())
+}
+
+// ============================================================================
+// User cache permission queries
+// ============================================================================
+
+/// Gets all permissions for a user.
+pub async fn get_user_permissions(
+    conn: &TursoConnection,
+    user_id: i64,
+) -> ServerResult<Vec<UserCachePermissionModel>> {
+    let sql = r#"
+        SELECT id, user_id, cache_name, can_pull, can_push, can_delete,
+               can_create_cache, can_configure_cache, can_destroy_cache, created_at
+        FROM user_cache_permission
+        WHERE user_id = ?1
+        ORDER BY cache_name ASC
+    "#;
+
+    let mut rows = conn.query(sql, [user_id]).await.map_err(db_err)?;
+
+    let mut permissions = Vec::new();
+    while let Some(row) = rows.next().await.map_err(db_err)? {
+        permissions.push(UserCachePermissionModel::from_row(&row).map_err(db_err)?);
+    }
+
+    Ok(permissions)
+}
+
+/// Sets or updates a permission for a user on a cache.
+pub async fn set_user_permission(
+    conn: &TursoConnection,
+    user_id: i64,
+    cache_name: &str,
+    can_pull: bool,
+    can_push: bool,
+    can_delete: bool,
+    can_create_cache: bool,
+    can_configure_cache: bool,
+    can_destroy_cache: bool,
+) -> ServerResult<UserCachePermissionModel> {
+    let now = Utc::now().to_rfc3339();
+    let pull = if can_pull { 1i64 } else { 0i64 };
+    let push = if can_push { 1i64 } else { 0i64 };
+    let delete = if can_delete { 1i64 } else { 0i64 };
+    let create = if can_create_cache { 1i64 } else { 0i64 };
+    let configure = if can_configure_cache { 1i64 } else { 0i64 };
+    let destroy = if can_destroy_cache { 1i64 } else { 0i64 };
+
+    let sql = r#"
+        INSERT INTO user_cache_permission
+            (user_id, cache_name, can_pull, can_push, can_delete,
+             can_create_cache, can_configure_cache, can_destroy_cache, created_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        ON CONFLICT(user_id, cache_name) DO UPDATE SET
+            can_pull = excluded.can_pull,
+            can_push = excluded.can_push,
+            can_delete = excluded.can_delete,
+            can_create_cache = excluded.can_create_cache,
+            can_configure_cache = excluded.can_configure_cache,
+            can_destroy_cache = excluded.can_destroy_cache
+        RETURNING id, user_id, cache_name, can_pull, can_push, can_delete,
+                  can_create_cache, can_configure_cache, can_destroy_cache, created_at
+    "#;
+
+    let mut rows = conn
+        .query(
+            sql,
+            (
+                user_id,
+                cache_name,
+                pull,
+                push,
+                delete,
+                create,
+                configure,
+                destroy,
+                now.as_str(),
+            ),
+        )
+        .await
+        .map_err(db_err)?;
+
+    match rows.next().await.map_err(db_err)? {
+        Some(row) => UserCachePermissionModel::from_row(&row).map_err(db_err),
+        None => Err(ErrorKind::DatabaseError(anyhow!("Failed to set permission")).into()),
+    }
+}
+
+/// Deletes a permission for a user on a cache.
+pub async fn delete_user_permission(
+    conn: &TursoConnection,
+    user_id: i64,
+    cache_name: &str,
+) -> ServerResult<()> {
+    let sql = "DELETE FROM user_cache_permission WHERE user_id = ?1 AND cache_name = ?2";
+    conn.execute(sql, (user_id, cache_name))
+        .await
+        .map_err(db_err)?;
+    Ok(())
+}
+
+// ============================================================================
+// Session queries
+// ============================================================================
+
+/// Creates a new session.
+pub async fn create_session(
+    conn: &TursoConnection,
+    user_id: i64,
+    session_id: &str,
+    expires_at: &str,
+) -> ServerResult<SessionModel> {
+    let now = Utc::now().to_rfc3339();
+
+    let sql = r#"
+        INSERT INTO session (id, user_id, created_at, expires_at)
+        VALUES (?1, ?2, ?3, ?4)
+        RETURNING id, user_id, created_at, expires_at
+    "#;
+
+    let mut rows = conn
+        .query(sql, (session_id, user_id, now.as_str(), expires_at))
+        .await
+        .map_err(db_err)?;
+
+    match rows.next().await.map_err(db_err)? {
+        Some(row) => SessionModel::from_row(&row).map_err(db_err),
+        None => Err(ErrorKind::DatabaseError(anyhow!("Failed to create session")).into()),
+    }
+}
+
+/// Finds a session by ID and returns it with the associated user.
+pub async fn find_session(
+    conn: &TursoConnection,
+    session_id: &str,
+) -> ServerResult<Option<(SessionModel, UserModel)>> {
+    let sql = r#"
+        SELECT s.id, s.user_id, s.created_at, s.expires_at,
+               u.id, u.username, u.display_name, u.is_admin, u.created_at, u.last_login_at
+        FROM session s
+        INNER JOIN user u ON s.user_id = u.id
+        WHERE s.id = ?1
+    "#;
+
+    let mut rows = conn.query(sql, [session_id]).await.map_err(db_err)?;
+
+    match rows.next().await.map_err(db_err)? {
+        Some(row) => {
+            let session = SessionModel::from_row_at(&row, 0).map_err(db_err)?;
+            let user = UserModel::from_row_at(&row, SessionModel::column_count() as i32)
+                .map_err(db_err)?;
+            Ok(Some((session, user)))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Deletes a session by ID.
+pub async fn delete_session(conn: &TursoConnection, session_id: &str) -> ServerResult<()> {
+    let sql = "DELETE FROM session WHERE id = ?1";
+    conn.execute(sql, [session_id]).await.map_err(db_err)?;
+    Ok(())
+}
+
+/// Deletes all sessions for a user.
+pub async fn delete_user_sessions(conn: &TursoConnection, user_id: i64) -> ServerResult<()> {
+    let sql = "DELETE FROM session WHERE user_id = ?1";
+    conn.execute(sql, [user_id]).await.map_err(db_err)?;
+    Ok(())
+}
+
+/// Cleans up expired sessions.
+pub async fn cleanup_expired_sessions(conn: &TursoConnection) -> ServerResult<u64> {
+    let now = Utc::now().to_rfc3339();
+    let sql = "DELETE FROM session WHERE expires_at < ?1";
+    let affected = conn.execute(sql, [now]).await.map_err(db_err)?;
+    Ok(affected)
+}
+
+/// Lists all caches (for dashboard).
+pub async fn list_all_caches(conn: &TursoConnection) -> ServerResult<Vec<CacheModel>> {
+    let sql = r#"
+        SELECT id, name, keypair, is_public, store_dir, priority,
+               upstream_cache_key_names, created_at, deleted_at, retention_period,
+               created_by_user_id
+        FROM cache
+        WHERE deleted_at IS NULL
+        ORDER BY name ASC
+    "#;
+
+    let mut rows = conn.query(sql, ()).await.map_err(db_err)?;
+
+    let mut caches = Vec::new();
+    while let Some(row) = rows.next().await.map_err(db_err)? {
+        caches.push(CacheModel::from_row(&row).map_err(db_err)?);
+    }
+
+    Ok(caches)
+}
+
+/// Counts objects in a cache.
+pub async fn count_objects_in_cache(conn: &TursoConnection, cache_id: i64) -> ServerResult<i64> {
+    let sql = "SELECT COUNT(*) FROM object WHERE cache_id = ?1";
+    let mut rows = conn.query(sql, [cache_id]).await.map_err(db_err)?;
+
+    match rows.next().await.map_err(db_err)? {
+        Some(row) => row.get::<i64>(0).map_err(db_err),
+        None => Ok(0),
+    }
 }
 
 #[cfg(test)]

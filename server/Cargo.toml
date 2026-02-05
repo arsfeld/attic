@@ -27,7 +27,10 @@ async-stream = "0.3.6"
 async-trait = "0.1.88"
 aws-config = "1.8.1"
 aws-sdk-s3 = "1.96.0"
+askama = { version = "0.12", features = ["with-axum"] }
+askama_axum = "0.4"
 axum = "0.7.9"
+axum-extra = { version = "0.9", features = ["cookie", "cookie-signed", "cookie-private"] }
 axum-macros = "0.4.2"
 base64 = "0.22.1"
 bytes = "1.10.1"
@@ -57,10 +60,14 @@ tower-http = { version = "0.5.2", features = [ "catch-panic", "trace" ] }
 tracing = "0.1.41"
 tracing-error = "0.2.1"
 tracing-subscriber = { version = "0.3.19", features = [ "json" ] }
+url = "2.5"
 uuid = { version = "1.17.0", features = ["v4"] }
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+dashmap = "6.1"
 console-subscriber = "0.2.0"
 xdg = "3.0.0"
 rsa = "0.9.8"
+time = "0.3"
 
 [dependencies.async-compression]
 version = "0.4.25"

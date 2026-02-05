@@ -15,6 +15,7 @@
 , nix
 , boost
 , libarchive
+, openssl
 
 , extraPackageArgs ? {}
 }:
@@ -45,6 +46,7 @@ let
   buildInputs = [
     nix boost
     libarchive
+    openssl
   ];
 
   crossArgs = let

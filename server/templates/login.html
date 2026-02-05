@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+
+{% block title %}Login - Attic{% endblock %}
+
+{% block nav %}{% endblock %}
+
+{% block content %}
+<div class="flex justify-center items-center min-h-[70vh]">
+    <div class="card bg-base-100 shadow-xl w-full max-w-md">
+        <div class="card-body">
+            <div class="text-center mb-4">
+                <h1 class="text-3xl font-bold">Attic</h1>
+                <p class="text-base-content/70 mt-1">Binary Cache Server</p>
+            </div>
+
+            <form id="login-form">
+                <div class="form-control w-full">
+                    <label class="label">
+                        <span class="label-text">Username</span>
+                    </label>
+                    <input
+                        type="text"
+                        id="username"
+                        name="username"
+                        required
+                        autocomplete="username webauthn"
+                        placeholder="Enter your username"
+                        class="input input-bordered w-full"
+                    />
+                </div>
+
+                <div class="card-actions mt-6">
+                    <button type="submit" id="login-btn" class="btn btn-primary w-full">
+                        Login with Passkey
+                    </button>
+                </div>
+            </form>
+
+            <div id="error" class="alert alert-error mt-4 hidden">
+                <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                <span id="error-text"></span>
+            </div>
+
+            <div class="divider">OR</div>
+
+            <a href="/ui/register" class="btn btn-ghost w-full">
+                Need an account? Register
+            </a>
+        </div>
+    </div>
+</div>
+
+<script>
+// Convert base64url to ArrayBuffer
+function base64urlToBuffer(base64url) {
+    const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+    const padding = '='.repeat((4 - base64.length % 4) % 4);
+    const binary = atob(base64 + padding);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes.buffer;
+}
+
+// Convert ArrayBuffer to base64url
+function bufferToBase64url(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+document.getElementById('login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const errorDiv = document.getElementById('error');
+    const errorText = document.getElementById('error-text');
+    const loginBtn = document.getElementById('login-btn');
+    const username = document.getElementById('username').value;
+
+    errorDiv.classList.add('hidden');
+    loginBtn.disabled = true;
+    loginBtn.innerHTML = '<span class="loading loading-spinner"></span> Authenticating...';
+
+    try {
+        // Start authentication
+        const startRes = await fetch('/ui/auth/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username })
+        });
+
+        if (!startRes.ok) {
+            const data = await startRes.json();
+            throw new Error(data.error || 'Authentication failed');
+        }
+
+        const { challenge } = await startRes.json();
+
+        // Convert challenge data
+        challenge.publicKey.challenge = base64urlToBuffer(challenge.publicKey.challenge);
+        if (challenge.publicKey.allowCredentials) {
+            challenge.publicKey.allowCredentials = challenge.publicKey.allowCredentials.map(cred => ({
+                ...cred,
+                id: base64urlToBuffer(cred.id)
+            }));
+        }
+
+        // Browser passkey prompt
+        const credential = await navigator.credentials.get({
+            publicKey: challenge.publicKey
+        });
+
+        // Prepare credential for server
+        const credentialData = {
+            id: credential.id,
+            rawId: bufferToBase64url(credential.rawId),
+            type: credential.type,
+            response: {
+                authenticatorData: bufferToBase64url(credential.response.authenticatorData),
+                clientDataJSON: bufferToBase64url(credential.response.clientDataJSON),
+                signature: bufferToBase64url(credential.response.signature),
+                userHandle: credential.response.userHandle
+                    ? bufferToBase64url(credential.response.userHandle)
+                    : null
+            }
+        };
+
+        // Finish authentication
+        const finishRes = await fetch('/ui/auth/finish', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                username,
+                credential: credentialData
+            })
+        });
+
+        const result = await finishRes.json();
+
+        if (result.success) {
+            window.location.href = result.redirect || '/ui';
+        } else {
+            throw new Error(result.error || 'Authentication failed');
+        }
+    } catch (err) {
+        console.error('Login error:', err);
+        errorText.textContent = err.message || 'Authentication failed. Please try again.';
+        errorDiv.classList.remove('hidden');
+    } finally {
+        loginBtn.disabled = false;
+        loginBtn.innerHTML = 'Login with Passkey';
+    }
+});
+</script>
+{% endblock %}

@@ -1,0 +1,321 @@
+{% extends "base.html" %}
+{% import "_macros.html" as macros %}
+
+{% block title %}Generate Token - Attic{% endblock %}
+
+{% block nav_right %}
+{% call macros::nav_links(user, "tokens") %}
+{% endblock %}
+
+{% block content %}
+<div class="flex justify-between items-center mb-6">
+    <div>
+        <h1 class="text-3xl font-bold">{% if is_admin %}API Tokens{% else %}Generate API Token{% endif %}</h1>
+        <p class="text-base-content/70">{% if is_admin %}Generate JWT tokens for CLI and CI access{% else %}Create tokens for CLI and CI access{% endif %}</p>
+    </div>
+    <div class="flex gap-2">
+        <button class="btn btn-primary" onclick="create_token_modal.showModal()">Create Token</button>
+        <a href="/ui" class="btn btn-ghost">Back to Dashboard</a>
+    </div>
+</div>
+
+<div class="grid gap-6 {% if !is_admin %}lg:grid-cols-2{% endif %}">
+    {% if !is_admin %}
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <h2 class="card-title">Your Permissions</h2>
+            <p class="text-base-content/70 text-sm mb-4">You can create tokens with these permissions:</p>
+            {% if permissions.is_empty() %}
+            <div class="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-info shrink-0 w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                <span>No permissions assigned. Contact an administrator.</span>
+            </div>
+            {% else %}
+            <div class="overflow-x-auto">
+                <table class="table table-sm">
+                    <thead>
+                        <tr>
+                            <th>Pattern</th>
+                            <th>Permissions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for perm in permissions %}
+                        <tr>
+                            <td class="font-mono text-sm">{{ perm.cache_name }}</td>
+                            <td>
+                                <div class="flex flex-wrap gap-1">
+                                    {% if perm.can_pull %}<span class="badge badge-xs badge-info">pull</span>{% endif %}
+                                    {% if perm.can_push %}<span class="badge badge-xs badge-success">push</span>{% endif %}
+                                    {% if perm.can_delete %}<span class="badge badge-xs badge-error">delete</span>{% endif %}
+                                    {% if perm.can_create_cache %}<span class="badge badge-xs badge-accent">create</span>{% endif %}
+                                    {% if perm.can_configure_cache %}<span class="badge badge-xs badge-warning">configure</span>{% endif %}
+                                    {% if perm.can_destroy_cache %}<span class="badge badge-xs badge-error">destroy</span>{% endif %}
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <h2 class="card-title">Available Caches</h2>
+            <p class="text-base-content/70 text-sm mb-4">{% if is_admin %}These caches can be referenced when creating tokens:{% else %}Caches you can reference in tokens:{% endif %}</p>
+            {% if caches.is_empty() %}
+            <div class="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-info shrink-0 w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                <span>No caches {% if is_admin %}yet. <a href="/ui/caches" class="link link-primary font-medium">Create a cache</a> first.{% else %}available.{% endif %}</span>
+            </div>
+            {% else %}
+            <div class="flex flex-wrap gap-2">
+                {% for cache in caches %}
+                <span class="badge badge-lg">{{ cache.name }}</span>
+                {% endfor %}
+            </div>
+            <p class="text-xs text-base-content/50 mt-4">
+                Tip: Use <code class="bg-base-200 px-1 rounded">*</code> for all caches, or <code class="bg-base-200 px-1 rounded">prefix-*</code> for wildcards
+            </p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<div class="card bg-base-100 shadow-xl mt-6">
+    <div class="card-body">
+        <h2 class="card-title">About API Tokens</h2>
+        <p class="text-base-content/70">
+            API tokens are used by the Attic CLI {% if is_admin %}and CI systems {% endif %}to authenticate with the server.
+            {% if !is_admin %}You can only create tokens with permissions you already have.{% else %}Tokens are stateless JWTs - they cannot be revoked individually, so set appropriate expiration times.{% endif %}
+        </p>
+        <div class="alert alert-warning mt-4">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-current shrink-0 w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            <span>Tokens are shown only once when created. Store them securely!</span>
+        </div>
+    </div>
+</div>
+
+<dialog id="create_token_modal" class="modal">
+    <div class="modal-box max-w-2xl">
+        <h3 class="font-bold text-lg">Create API Token</h3>
+        <form id="create_token_form" class="mt-4">
+            {% if is_admin %}
+            <div class="form-control w-full">
+                <label class="label"><span class="label-text">Subject (username or identifier)</span></label>
+                <input name="subject" type="text" placeholder="ci-runner" class="input input-bordered w-full" />
+                <label class="label"><span class="label-text-alt">Identifies who/what this token is for (defaults to your username)</span></label>
+            </div>
+            {% endif %}
+
+            <div class="form-control w-full {% if is_admin %}mt-2{% endif %}">
+                <label class="label"><span class="label-text">Cache Pattern</span></label>
+                <input name="cache_pattern" type="text" required placeholder="my-cache or team-*" class="input input-bordered w-full" />
+                <label class="label"><span class="label-text-alt">Use * as wildcard. Example: "team-*" matches team-frontend, team-backend, etc.</span></label>
+            </div>
+
+            <div class="form-control w-full mt-2">
+                <label class="label"><span class="label-text">Validity Period</span></label>
+                <select name="validity" class="select select-bordered w-full">
+                    <option value="1d">1 day</option>
+                    <option value="7d">7 days</option>
+                    <option value="30d" selected>30 days</option>
+                    <option value="90d">90 days</option>
+                    <option value="365d">1 year</option>
+                    {% if is_admin %}<option value="730d">2 years</option>{% endif %}
+                </select>
+            </div>
+
+            <div class="divider">Permissions</div>
+
+            {% if !is_admin %}
+            <div class="alert alert-info mb-4">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-current shrink-0 w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                <span class="text-sm">Only permissions you have will be granted.</span>
+            </div>
+            {% endif %}
+
+            <div class="grid grid-cols-2 gap-4">
+                <div class="form-control">
+                    <label class="label cursor-pointer justify-start gap-4">
+                        <input name="can_pull" type="checkbox" checked class="checkbox" />
+                        <div>
+                            <span class="label-text font-medium">Pull</span>
+                            <p class="text-xs text-base-content/50">Download store paths</p>
+                        </div>
+                    </label>
+                </div>
+                <div class="form-control">
+                    <label class="label cursor-pointer justify-start gap-4">
+                        <input name="can_push" type="checkbox" checked class="checkbox" />
+                        <div>
+                            <span class="label-text font-medium">Push</span>
+                            <p class="text-xs text-base-content/50">Upload store paths</p>
+                        </div>
+                    </label>
+                </div>
+                <div class="form-control">
+                    <label class="label cursor-pointer justify-start gap-4">
+                        <input name="can_delete" type="checkbox" class="checkbox" />
+                        <div>
+                            <span class="label-text font-medium">Delete</span>
+                            <p class="text-xs text-base-content/50">Remove store paths</p>
+                        </div>
+                    </label>
+                </div>
+                <div class="form-control">
+                    <label class="label cursor-pointer justify-start gap-4">
+                        <input name="can_create_cache" type="checkbox" class="checkbox" />
+                        <div>
+                            <span class="label-text font-medium">Create Cache</span>
+                            <p class="text-xs text-base-content/50">Create new caches</p>
+                        </div>
+                    </label>
+                </div>
+                <div class="form-control">
+                    <label class="label cursor-pointer justify-start gap-4">
+                        <input name="can_configure_cache" type="checkbox" class="checkbox" />
+                        <div>
+                            <span class="label-text font-medium">Configure Cache</span>
+                            <p class="text-xs text-base-content/50">Modify cache settings</p>
+                        </div>
+                    </label>
+                </div>
+                <div class="form-control">
+                    <label class="label cursor-pointer justify-start gap-4">
+                        <input name="can_destroy_cache" type="checkbox" class="checkbox" />
+                        <div>
+                            <span class="label-text font-medium">Destroy Cache</span>
+                            <p class="text-xs text-base-content/50">Delete caches</p>
+                        </div>
+                    </label>
+                </div>
+            </div>
+
+            <div class="modal-action">
+                <button type="button" class="btn" onclick="create_token_modal.close()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Generate Token</button>
+            </div>
+        </form>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+<dialog id="token_result_modal" class="modal">
+    <div class="modal-box max-w-3xl">
+        <h3 class="font-bold text-lg text-success">Token Created Successfully</h3>
+        <div class="alert alert-warning mt-4">
+            <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+            <span>Copy this token now. It will not be shown again!</span>
+        </div>
+        <div id="granted_permissions_info" class="mt-4"></div>
+        <div class="form-control mt-4">
+            <label class="label"><span class="label-text">Your API Token</span></label>
+            <div class="join w-full">
+                <input id="generated_token" type="text" readonly class="input input-bordered join-item w-full font-mono text-xs" />
+                <button type="button" class="btn join-item" onclick="copyToken()">Copy</button>
+            </div>
+        </div>
+        <div class="mt-4">
+            <p class="text-sm font-medium mb-2">Usage:</p>
+            <div class="mockup-code text-xs">
+                <pre data-prefix="$"><code>attic login myserver https://your-server --set-default</code></pre>
+                <pre data-prefix="#" class="text-base-content/50"><code>Paste token when prompted</code></pre>
+            </div>
+        </div>
+        <div class="modal-action">
+            <button type="button" class="btn" onclick="token_result_modal.close()">Close</button>
+        </div>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+<script>
+document.getElementById('create_token_form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const formData = new FormData(form);
+
+    const data = {
+        cache_pattern: formData.get('cache_pattern'),
+        validity: formData.get('validity'),
+        can_pull: form.querySelector('[name="can_pull"]').checked,
+        can_push: form.querySelector('[name="can_push"]').checked,
+        can_delete: form.querySelector('[name="can_delete"]').checked,
+        can_create_cache: form.querySelector('[name="can_create_cache"]').checked,
+        can_configure_cache: form.querySelector('[name="can_configure_cache"]').checked,
+        can_destroy_cache: form.querySelector('[name="can_destroy_cache"]').checked,
+    };
+
+    {% if is_admin %}
+    // Admin can specify subject
+    const subjectInput = form.querySelector('[name="subject"]');
+    if (subjectInput && subjectInput.value.trim()) {
+        data.subject = subjectInput.value.trim();
+    }
+    {% endif %}
+
+    try {
+        const res = await fetch('/ui/tokens', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+
+        const result = await res.json();
+
+        if (result.success && result.token) {
+            create_token_modal.close();
+            document.getElementById('generated_token').value = result.token;
+
+            const grantedInfo = document.getElementById('granted_permissions_info');
+            if (result.granted_permissions) {
+                const granted = result.granted_permissions;
+                const badges = [];
+                if (granted.can_pull) badges.push('<span class="badge badge-sm badge-info">pull</span>');
+                if (granted.can_push) badges.push('<span class="badge badge-sm badge-success">push</span>');
+                if (granted.can_delete) badges.push('<span class="badge badge-sm badge-error">delete</span>');
+                if (granted.can_create_cache) badges.push('<span class="badge badge-sm badge-accent">create</span>');
+                if (granted.can_configure_cache) badges.push('<span class="badge badge-sm badge-warning">configure</span>');
+                if (granted.can_destroy_cache) badges.push('<span class="badge badge-sm badge-error">destroy</span>');
+
+                grantedInfo.innerHTML = `
+                    <div class="text-sm">
+                        <span class="font-medium">Granted permissions:</span>
+                        <div class="flex flex-wrap gap-1 mt-1">${badges.join('')}</div>
+                    </div>
+                `;
+            } else {
+                grantedInfo.innerHTML = '';
+            }
+
+            token_result_modal.showModal();
+            form.reset();
+        } else {
+            alert(result.error || 'Failed to create token');
+        }
+    } catch (err) {
+        alert('Failed to create token: ' + err.message);
+    }
+});
+
+function copyToken() {
+    const tokenInput = document.getElementById('generated_token');
+    tokenInput.select();
+    document.execCommand('copy');
+
+    const btn = event.target;
+    const originalText = btn.textContent;
+    btn.textContent = 'Copied!';
+    btn.classList.add('btn-success');
+    setTimeout(() => {
+        btn.textContent = originalText;
+        btn.classList.remove('btn-success');
+    }, 2000);
+}
+</script>
+{% endblock %}

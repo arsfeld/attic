@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% import "_macros.html" as macros %}
+
+{% block title %}Users - Attic Admin{% endblock %}
+
+{% block nav_right %}
+{% call macros::nav_links(user, "users") %}
+{% endblock %}
+
+{% block content %}
+<div class="flex justify-between items-center mb-6">
+    <h1 class="text-3xl font-bold">Users</h1>
+    <button class="btn btn-primary" onclick="create_user_modal.showModal()">
+        Create User
+    </button>
+</div>
+
+<div class="card bg-base-100 shadow-xl">
+    <div class="overflow-x-auto">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Username</th>
+                    <th>Display Name</th>
+                    <th>Role</th>
+                    <th>Last Login</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for u in users %}
+                <tr class="hover">
+                    <td class="font-bold">{{ u.username }}</td>
+                    <td>{% match u.display_name %}{% when Some with (dn) %}{{ dn }}{% when None %}-{% endmatch %}</td>
+                    <td>
+                        {% if u.is_admin %}
+                        <span class="badge badge-primary">Admin</span>
+                        {% else %}
+                        <span class="badge badge-ghost">User</span>
+                        {% endif %}
+                    </td>
+                    <td>{% match u.last_login_at %}{% when Some with (last) %}{{ last.format("%Y-%m-%d %H:%M") }}{% when None %}-{% endmatch %}</td>
+                    <td>
+                        <a href="/ui/admin/users/{{ u.id }}" class="btn btn-ghost btn-sm">
+                            Edit
+                        </a>
+                        {% if u.id != user.id %}
+                        <button onclick="deleteUser({{ u.id }}, '{{ u.username }}')" class="btn btn-ghost btn-sm text-error">
+                            Delete
+                        </button>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<dialog id="create_user_modal" class="modal">
+    <div class="modal-box">
+        <h3 class="font-bold text-lg">Create User</h3>
+        <form method="post" action="/ui/admin/users">
+            <div class="form-control w-full mt-4">
+                <label class="label"><span class="label-text">Username</span></label>
+                <input name="username" type="text" required placeholder="username" class="input input-bordered w-full" />
+            </div>
+            <div class="form-control w-full mt-2">
+                <label class="label"><span class="label-text">Display Name</span></label>
+                <input name="display_name" type="text" placeholder="Display Name" class="input input-bordered w-full" />
+            </div>
+            <div class="form-control mt-4">
+                <label class="label cursor-pointer justify-start gap-4">
+                    <input name="is_admin" value="true" type="checkbox" class="checkbox" />
+                    <span class="label-text">Administrator</span>
+                </label>
+            </div>
+            <div class="modal-action">
+                <button type="button" class="btn" onclick="create_user_modal.close()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Create</button>
+            </div>
+        </form>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+<script>
+async function deleteUser(userId, username) {
+    if (!confirm(`Are you sure you want to delete user "${username}"?`)) {
+        return;
+    }
+
+    try {
+        const res = await fetch(`/ui/admin/users/${userId}`, {
+            method: 'DELETE'
+        });
+
+        if (res.ok) {
+            window.location.reload();
+        } else {
+            const data = await res.json();
+            alert(data.error || 'Failed to delete user');
+        }
+    } catch (err) {
+        alert('Failed to delete user');
+    }
+}
+</script>
+{% endblock %}

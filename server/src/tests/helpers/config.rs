@@ -8,7 +8,7 @@ use attic_token::HS256Key;
 
 use crate::config::{
     ChunkingConfig, CompressionConfig, CompressionType, Config, DatabaseConfig,
-    GarbageCollectionConfig, JWTConfig, JWTSigningConfig, StorageConfig,
+    GarbageCollectionConfig, JWTConfig, JWTSigningConfig, StorageConfig, WebUiConfig,
 };
 use crate::storage::LocalStorageConfig;
 
@@ -100,6 +100,7 @@ impl TestConfigBuilder {
                 token_bound_audiences: None,
                 signing_config: JWTSigningConfig::HS256SignAndVerify(self.jwt_secret),
             },
+            web_ui: WebUiConfig::default(),
             _depreated_token_hs256_secret: None,
         }
     }

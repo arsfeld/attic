@@ -113,6 +113,7 @@ pub struct CacheModel {
     pub created_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub retention_period: Option<i32>,
+    pub created_by_user_id: Option<i64>,
 }
 
 impl CacheModel {
@@ -137,6 +138,7 @@ impl CacheModel {
                 .map(|s| parse_datetime(&s))
                 .transpose()?,
             retention_period: row.get::<Option<i64>>(start + 9)?.map(|v| v as i32),
+            created_by_user_id: row.get::<Option<i64>>(start + 10)?,
         })
     }
 
@@ -147,7 +149,7 @@ impl CacheModel {
 
     /// Returns the number of columns in this model.
     pub const fn column_count() -> usize {
-        10
+        11
     }
 
     /// Returns the signing keypair for this cache.
@@ -383,6 +385,169 @@ impl ChunkRefModel {
     /// Returns the number of columns in this model.
     pub const fn column_count() -> usize {
         6
+    }
+}
+
+// ============================================================================
+// Web UI Models
+// ============================================================================
+
+/// A user account for web UI authentication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserModel {
+    pub id: i64,
+    pub username: String,
+    pub display_name: Option<String>,
+    pub is_admin: bool,
+    pub created_at: DateTime<Utc>,
+    pub last_login_at: Option<DateTime<Utc>>,
+}
+
+impl UserModel {
+    /// Parses a UserModel from a database row.
+    pub fn from_row(row: &Row) -> Result<Self> {
+        Self::from_row_at(row, 0)
+    }
+
+    /// Parses a UserModel from a row starting at the given index.
+    pub fn from_row_at(row: &Row, start: i32) -> Result<Self> {
+        Ok(Self {
+            id: row.get::<i64>(start)?,
+            username: row.get::<String>(start + 1)?,
+            display_name: row.get::<Option<String>>(start + 2)?,
+            is_admin: row.get::<i64>(start + 3)? != 0,
+            created_at: parse_datetime(&row.get::<String>(start + 4)?)?,
+            last_login_at: row
+                .get::<Option<String>>(start + 5)?
+                .map(|s| parse_datetime(&s))
+                .transpose()?,
+        })
+    }
+
+    /// Returns the number of columns in this model.
+    pub const fn column_count() -> usize {
+        6
+    }
+}
+
+/// A WebAuthn credential (passkey) for a user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialModel {
+    pub id: i64,
+    pub user_id: i64,
+    pub credential_id: Vec<u8>,
+    pub public_key: Vec<u8>,
+    pub counter: u32,
+    pub name: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+impl CredentialModel {
+    /// Parses a CredentialModel from a database row.
+    pub fn from_row(row: &Row) -> Result<Self> {
+        Self::from_row_at(row, 0)
+    }
+
+    /// Parses a CredentialModel from a row starting at the given index.
+    pub fn from_row_at(row: &Row, start: i32) -> Result<Self> {
+        Ok(Self {
+            id: row.get::<i64>(start)?,
+            user_id: row.get::<i64>(start + 1)?,
+            credential_id: row.get::<Vec<u8>>(start + 2)?,
+            public_key: row.get::<Vec<u8>>(start + 3)?,
+            counter: row.get::<i64>(start + 4)? as u32,
+            name: row.get::<Option<String>>(start + 5)?,
+            created_at: parse_datetime(&row.get::<String>(start + 6)?)?,
+            last_used_at: row
+                .get::<Option<String>>(start + 7)?
+                .map(|s| parse_datetime(&s))
+                .transpose()?,
+        })
+    }
+
+    /// Returns the number of columns in this model.
+    pub const fn column_count() -> usize {
+        8
+    }
+}
+
+/// Permission grant for a user on a specific cache (or cache pattern).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserCachePermissionModel {
+    pub id: i64,
+    pub user_id: i64,
+    pub cache_name: String,
+    pub can_pull: bool,
+    pub can_push: bool,
+    pub can_delete: bool,
+    pub can_create_cache: bool,
+    pub can_configure_cache: bool,
+    pub can_destroy_cache: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+impl UserCachePermissionModel {
+    /// Parses a UserCachePermissionModel from a database row.
+    pub fn from_row(row: &Row) -> Result<Self> {
+        Self::from_row_at(row, 0)
+    }
+
+    /// Parses a UserCachePermissionModel from a row starting at the given index.
+    pub fn from_row_at(row: &Row, start: i32) -> Result<Self> {
+        Ok(Self {
+            id: row.get::<i64>(start)?,
+            user_id: row.get::<i64>(start + 1)?,
+            cache_name: row.get::<String>(start + 2)?,
+            can_pull: row.get::<i64>(start + 3)? != 0,
+            can_push: row.get::<i64>(start + 4)? != 0,
+            can_delete: row.get::<i64>(start + 5)? != 0,
+            can_create_cache: row.get::<i64>(start + 6)? != 0,
+            can_configure_cache: row.get::<i64>(start + 7)? != 0,
+            can_destroy_cache: row.get::<i64>(start + 8)? != 0,
+            created_at: parse_datetime(&row.get::<String>(start + 9)?)?,
+        })
+    }
+
+    /// Returns the number of columns in this model.
+    pub const fn column_count() -> usize {
+        10
+    }
+}
+
+/// A user session for web UI authentication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionModel {
+    pub id: String,
+    pub user_id: i64,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl SessionModel {
+    /// Parses a SessionModel from a database row.
+    pub fn from_row(row: &Row) -> Result<Self> {
+        Self::from_row_at(row, 0)
+    }
+
+    /// Parses a SessionModel from a row starting at the given index.
+    pub fn from_row_at(row: &Row, start: i32) -> Result<Self> {
+        Ok(Self {
+            id: row.get::<String>(start)?,
+            user_id: row.get::<i64>(start + 1)?,
+            created_at: parse_datetime(&row.get::<String>(start + 2)?)?,
+            expires_at: parse_datetime(&row.get::<String>(start + 3)?)?,
+        })
+    }
+
+    /// Returns the number of columns in this model.
+    pub const fn column_count() -> usize {
+        4
+    }
+
+    /// Checks if this session has expired.
+    pub fn is_expired(&self) -> bool {
+        self.expires_at < Utc::now()
     }
 }
 

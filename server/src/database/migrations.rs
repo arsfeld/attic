@@ -201,6 +201,80 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE nar ADD COLUMN completeness_hint INTEGER NOT NULL DEFAULT 1;
         "#,
     },
+    // Web UI authentication tables
+    Migration {
+        name: "m20240101_000001_create_user_table",
+        up_sql: r#"
+            CREATE TABLE IF NOT EXISTS user (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                display_name TEXT,
+                is_admin INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                last_login_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_username ON user (username);
+        "#,
+    },
+    Migration {
+        name: "m20240101_000002_create_credential_table",
+        up_sql: r#"
+            CREATE TABLE IF NOT EXISTS credential (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                credential_id BLOB NOT NULL UNIQUE,
+                public_key BLOB NOT NULL,
+                counter INTEGER NOT NULL DEFAULT 0,
+                name TEXT,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_credential_user_id ON credential (user_id);
+            CREATE INDEX IF NOT EXISTS idx_credential_credential_id ON credential (credential_id);
+        "#,
+    },
+    Migration {
+        name: "m20240101_000003_create_user_cache_permission_table",
+        up_sql: r#"
+            CREATE TABLE IF NOT EXISTS user_cache_permission (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                cache_name TEXT NOT NULL,
+                can_pull INTEGER NOT NULL DEFAULT 0,
+                can_push INTEGER NOT NULL DEFAULT 0,
+                can_delete INTEGER NOT NULL DEFAULT 0,
+                can_create_cache INTEGER NOT NULL DEFAULT 0,
+                can_configure_cache INTEGER NOT NULL DEFAULT 0,
+                can_destroy_cache INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE,
+                UNIQUE(user_id, cache_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_cache_permission_user_id ON user_cache_permission (user_id);
+        "#,
+    },
+    Migration {
+        name: "m20240101_000004_create_session_table",
+        up_sql: r#"
+            CREATE TABLE IF NOT EXISTS session (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_session_user_id ON session (user_id);
+            CREATE INDEX IF NOT EXISTS idx_session_expires_at ON session (expires_at);
+        "#,
+    },
+    Migration {
+        name: "m20240201_000001_add_cache_created_by_user",
+        up_sql: r#"
+            ALTER TABLE cache ADD COLUMN created_by_user_id INTEGER REFERENCES user(id);
+            CREATE INDEX IF NOT EXISTS idx_cache_created_by ON cache (created_by_user_id);
+        "#,
+    },
 ];
 
 /// Runs all pending database migrations.

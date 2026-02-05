@@ -220,7 +220,10 @@ pub async fn run_api_server(cli_listen: Option<SocketAddr>, config: Config) -> R
     };
 
     let rest = Router::new()
-        .merge(api::get_router())
+        .merge(api::get_router_with_web_ui(
+            &state.config.web_ui,
+            state.clone(),
+        ))
         .fallback(fallback)
         // middlewares
         .layer(axum::middleware::from_fn(apply_auth))

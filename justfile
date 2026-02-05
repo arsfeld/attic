@@ -10,6 +10,14 @@ base := `pwd`
 list:
 	@just --list --unsorted
 
+# Run the server with hot restart (rebuilds on file changes)
+dev *args:
+	cargo watch -x 'run -p attic-server --bin atticd -- {{ args }}'
+
+# Run the server with hot restart (release mode)
+dev-release *args:
+	cargo watch -x 'run -p attic-server --bin atticd --release -- {{ args }}'
+
 # Run a command with an alternative Nix version
 with-nix version *command:
 	set -e; \

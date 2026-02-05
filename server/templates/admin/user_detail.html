@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+{% import "_macros.html" as macros %}
+
+{% block title %}{{ target_user.username }} - Attic Admin{% endblock %}
+
+{% block nav_right %}
+{% call macros::nav_links(user, "users") %}
+{% endblock %}
+
+{% block content %}
+<div class="breadcrumbs text-sm mb-4">
+    <ul>
+        <li><a href="/ui/admin/users">Users</a></li>
+        <li>{{ target_user.username }}</li>
+    </ul>
+</div>
+
+<div class="grid gap-6 lg:grid-cols-2">
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <h2 class="card-title">User Details</h2>
+            <div class="stats stats-vertical shadow">
+                <div class="stat">
+                    <div class="stat-title">Username</div>
+                    <div class="stat-value text-lg">{{ target_user.username }}</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-title">Role</div>
+                    <div class="stat-value text-lg">
+                        {% if target_user.is_admin %}
+                        <span class="badge badge-primary">Admin</span>
+                        {% else %}
+                        <span class="badge badge-ghost">User</span>
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="stat">
+                    <div class="stat-title">Created</div>
+                    <div class="stat-value text-lg">{{ target_user.created_at.format("%Y-%m-%d") }}</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-title">Last Login</div>
+                    <div class="stat-value text-lg">
+                        {% match target_user.last_login_at %}{% when Some with (last) %}{{ last.format("%Y-%m-%d %H:%M") }}{% when None %}Never{% endmatch %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <h2 class="card-title">Passkeys</h2>
+            {% if credentials.is_empty() %}
+            <div class="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-info shrink-0 w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                <span>No passkeys registered. User needs to complete registration.</span>
+            </div>
+            {% else %}
+            <div class="space-y-2">
+                {% for cred in credentials %}
+                <div class="flex justify-between items-center p-3 bg-base-200 rounded-lg">
+                    <div>
+                        <span class="font-medium">
+                            {% match cred.name %}{% when Some with (n) %}{{ n }}{% when None %}Unnamed Passkey{% endmatch %}
+                        </span>
+                        <span class="text-sm text-base-content/50 ml-2">
+                            Created {{ cred.created_at.format("%Y-%m-%d") }}
+                        </span>
+                    </div>
+                    {% match cred.last_used_at %}{% when Some with (last) %}<span class="text-sm text-base-content/50">Last used {{ last.format("%Y-%m-%d %H:%M") }}</span>{% when None %}{% endmatch %}
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<div class="card bg-base-100 shadow-xl mt-6">
+    <div class="card-body">
+        <h2 class="card-title">Cache Permissions</h2>
+        <form method="post" action="/ui/admin/users/{{ target_user.id }}/permissions">
+            <div class="form-control w-full mb-4">
+                <label class="label"><span class="label-text">Cache Name (supports wildcards like team-*)</span></label>
+                <input name="cache_name" type="text" required placeholder="cache-name or pattern-*" class="input input-bordered w-full" />
+            </div>
+            <div class="flex flex-wrap gap-4 mb-4">
+                <label class="label cursor-pointer gap-2">
+                    <input name="can_pull" value="true" type="checkbox" class="checkbox checkbox-sm" />
+                    <span class="label-text">Pull</span>
+                </label>
+                <label class="label cursor-pointer gap-2">
+                    <input name="can_push" value="true" type="checkbox" class="checkbox checkbox-sm" />
+                    <span class="label-text">Push</span>
+                </label>
+                <label class="label cursor-pointer gap-2">
+                    <input name="can_delete" value="true" type="checkbox" class="checkbox checkbox-sm" />
+                    <span class="label-text">Delete</span>
+                </label>
+                <label class="label cursor-pointer gap-2">
+                    <input name="can_create_cache" value="true" type="checkbox" class="checkbox checkbox-sm" />
+                    <span class="label-text">Create</span>
+                </label>
+                <label class="label cursor-pointer gap-2">
+                    <input name="can_configure_cache" value="true" type="checkbox" class="checkbox checkbox-sm" />
+                    <span class="label-text">Configure</span>
+                </label>
+                <label class="label cursor-pointer gap-2">
+                    <input name="can_destroy_cache" value="true" type="checkbox" class="checkbox checkbox-sm" />
+                    <span class="label-text">Destroy</span>
+                </label>
+            </div>
+            <button type="submit" class="btn btn-primary btn-sm">Add Permission</button>
+        </form>
+
+        <div class="divider"></div>
+
+        {% if permissions.is_empty() %}
+        <div class="alert">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-info shrink-0 w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            <span>No permissions assigned. Add permissions above.</span>
+        </div>
+        {% else %}
+        <div class="overflow-x-auto">
+            <table class="table table-sm">
+                <thead>
+                    <tr>
+                        <th>Cache</th>
+                        <th>Permissions</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for perm in permissions %}
+                    <tr class="hover">
+                        <td><code class="bg-base-200 px-2 py-1 rounded">{{ perm.cache_name }}</code></td>
+                        <td>
+                            <div class="flex flex-wrap gap-1">
+                                {% if perm.can_pull %}<span class="badge badge-info badge-sm">pull</span>{% endif %}
+                                {% if perm.can_push %}<span class="badge badge-success badge-sm">push</span>{% endif %}
+                                {% if perm.can_delete %}<span class="badge badge-warning badge-sm">delete</span>{% endif %}
+                                {% if perm.can_create_cache %}<span class="badge badge-secondary badge-sm">create</span>{% endif %}
+                                {% if perm.can_configure_cache %}<span class="badge badge-accent badge-sm">configure</span>{% endif %}
+                                {% if perm.can_destroy_cache %}<span class="badge badge-error badge-sm">destroy</span>{% endif %}
+                            </div>
+                        </td>
+                        <td>
+                            <button class="btn btn-ghost btn-xs text-error"
+                                onclick="deletePermission('{{ perm.cache_name }}')">
+                                Remove
+                            </button>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<script>
+async function deletePermission(cacheName) {
+    if (!confirm(`Remove permission for "${cacheName}"?`)) {
+        return;
+    }
+
+    try {
+        const res = await fetch(`/ui/admin/users/{{ target_user.id }}/permissions/${encodeURIComponent(cacheName)}`, {
+            method: 'DELETE'
+        });
+
+        if (res.ok) {
+            window.location.reload();
+        } else {
+            const data = await res.json();
+            alert(data.error || 'Failed to remove permission');
+        }
+    } catch (err) {
+        alert('Failed to remove permission');
+    }
+}
+</script>
+{% endblock %}

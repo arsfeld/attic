@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% import "_macros.html" as macros %}
+
+{% block title %}Caches - Attic{% endblock %}
+
+{% block nav_right %}
+{% call macros::nav_links(user, "caches") %}
+{% endblock %}
+
+{% block content %}
+<div class="flex justify-between items-center mb-6">
+    <div>
+        <h1 class="text-3xl font-bold">Caches</h1>
+        <p class="text-base-content/70">{% if is_admin %}Manage all binary caches{% else %}Caches you have access to{% endif %}</p>
+    </div>
+    <div class="flex gap-2">
+        {% if can_create_cache %}
+        <button class="btn btn-primary" onclick="create_cache_modal.showModal()">Create Cache</button>
+        {% endif %}
+        <a href="/ui" class="btn btn-ghost">Back to Dashboard</a>
+    </div>
+</div>
+
+<div class="card bg-base-100 shadow-xl">
+    {% if caches.is_empty() %}
+    <div class="card-body">
+        <div class="alert">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-info shrink-0 w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            <span>{% if is_admin %}No caches yet. Create your first cache to get started.{% else %}No caches available.{% endif %}</span>
+        </div>
+    </div>
+    {% else %}
+    <div class="overflow-x-auto">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Objects</th>
+                    <th>Visibility</th>
+                    {% if !is_admin %}<th>Permissions</th>{% endif %}
+                    <th>Priority</th>
+                    {% if is_admin %}<th>Created</th>{% endif %}
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for cache in caches %}
+                <tr class="hover">
+                    <td>
+                        <div class="font-bold">{{ cache.cache.name }}</div>
+                        <div class="text-sm text-base-content/50">{{ cache.cache.store_dir }}</div>
+                    </td>
+                    <td>{{ cache.object_count }}</td>
+                    <td>
+                        {% if cache.cache.is_public %}
+                        <span class="badge badge-success badge-sm">Public</span>
+                        {% else %}
+                        <span class="badge badge-ghost badge-sm">Private</span>
+                        {% endif %}
+                    </td>
+                    {% if !is_admin %}
+                    <td>
+                        <div class="flex gap-1">
+                            {% if cache.can_pull %}
+                            <span class="badge badge-info badge-sm">Pull</span>
+                            {% endif %}
+                            {% if cache.can_push %}
+                            <span class="badge badge-success badge-sm">Push</span>
+                            {% endif %}
+                        </div>
+                    </td>
+                    {% endif %}
+                    <td>{{ cache.cache.priority }}</td>
+                    {% if is_admin %}
+                    <td class="text-sm text-base-content/50">{{ cache.cache.created_at.format("%Y-%m-%d") }}</td>
+                    {% endif %}
+                    <td>
+                        {% if cache.can_delete %}
+                        <button onclick="deleteCache('{{ cache.cache.name }}')" class="btn btn-ghost btn-sm text-error">
+                            Delete
+                        </button>
+                        {% else %}
+                        <span class="text-base-content/30">-</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</div>
+
+{% if can_create_cache %}
+<dialog id="create_cache_modal" class="modal">
+    <div class="modal-box">
+        <h3 class="font-bold text-lg">Create New Cache</h3>
+        <form method="post" action="/ui/caches" class="mt-4">
+            <div class="form-control w-full">
+                <label class="label"><span class="label-text">Cache Name</span></label>
+                <input name="name" type="text" required placeholder="my-cache" class="input input-bordered w-full" pattern="[a-zA-Z][a-zA-Z0-9_-]*" />
+                <label class="label"><span class="label-text-alt">Must start with a letter</span></label>
+            </div>
+            <div class="form-control mt-2">
+                <label class="label cursor-pointer justify-start gap-4">
+                    <input name="is_public" type="checkbox" value="true" class="checkbox" />
+                    <span class="label-text">Public cache (anyone can pull)</span>
+                </label>
+            </div>
+            <div class="collapse collapse-arrow bg-base-200 mt-4">
+                <input type="checkbox" />
+                <div class="collapse-title text-sm font-medium">Advanced Options</div>
+                <div class="collapse-content">
+                    <div class="form-control w-full">
+                        <label class="label"><span class="label-text">Store Directory</span></label>
+                        <input name="store_dir" type="text" placeholder="/nix/store" class="input input-bordered w-full" />
+                    </div>
+                    <div class="form-control w-full mt-2">
+                        <label class="label"><span class="label-text">Priority</span></label>
+                        <input name="priority" type="number" placeholder="41" class="input input-bordered w-full" />
+                        <label class="label"><span class="label-text-alt">Lower = higher priority. cache.nixos.org uses 40.</span></label>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-action">
+                <button type="button" class="btn" onclick="create_cache_modal.close()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Create</button>
+            </div>
+        </form>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+{% endif %}
+
+<script>
+async function deleteCache(cacheName) {
+    if (!confirm(`Are you sure you want to delete cache "${cacheName}"? This cannot be undone.`)) {
+        return;
+    }
+
+    try {
+        const res = await fetch(`/ui/caches/${encodeURIComponent(cacheName)}`, {
+            method: 'DELETE'
+        });
+
+        if (res.ok) {
+            window.location.reload();
+        } else {
+            const data = await res.json();
+            alert(data.error || 'Failed to delete cache');
+        }
+    } catch (err) {
+        alert('Failed to delete cache');
+    }
+}
+</script>
+{% endblock %}

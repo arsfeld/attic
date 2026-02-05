@@ -45,6 +45,7 @@ in
           cargo-outdated
           cargo-edit
           cargo-udeps
+          cargo-watch
           tokio-console
         ];
 

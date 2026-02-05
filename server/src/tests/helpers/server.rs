@@ -259,7 +259,10 @@ fn create_test_router(state: State) -> Router {
     use crate::middleware::{init_request_state, restrict_host, set_visibility_header};
 
     Router::new()
-        .merge(api::get_router())
+        .merge(api::get_router_with_web_ui(
+            &state.config.web_ui,
+            state.clone(),
+        ))
         .layer(axum::middleware::from_fn(apply_auth))
         .layer(axum::middleware::from_fn(set_visibility_header))
         .layer(axum::middleware::from_fn(init_request_state))

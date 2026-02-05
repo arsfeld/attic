@@ -1,0 +1,202 @@
+{% extends "base.html" %}
+
+{% block title %}Register - Attic{% endblock %}
+
+{% block nav %}{% endblock %}
+
+{% block content %}
+<div class="flex justify-center items-center min-h-[70vh]">
+    <div class="card bg-base-100 shadow-xl w-full max-w-md">
+        <div class="card-body">
+            <div class="text-center mb-4">
+                <h2 class="card-title text-2xl justify-center">Register Passkey</h2>
+                <p class="text-base-content/70">Set up your passkey to securely access Attic.</p>
+                {% if is_first_user %}
+                <div class="badge badge-info mt-2">You'll be the first user and administrator!</div>
+                {% endif %}
+            </div>
+
+            {% if can_register %}
+            <form id="register-form">
+                <div class="form-control w-full">
+                    <label class="label">
+                        <span class="label-text">Username</span>
+                    </label>
+                    <input
+                        type="text"
+                        id="username"
+                        name="username"
+                        required
+                        autocomplete="username webauthn"
+                        placeholder="Choose a username"
+                        class="input input-bordered w-full"
+                    />
+                </div>
+
+                <div class="form-control w-full mt-2">
+                    <label class="label">
+                        <span class="label-text">Display Name (optional)</span>
+                    </label>
+                    <input
+                        type="text"
+                        id="display_name"
+                        name="display_name"
+                        autocomplete="name"
+                        placeholder="Your display name"
+                        class="input input-bordered w-full"
+                    />
+                </div>
+
+                <div class="form-control w-full mt-2">
+                    <label class="label">
+                        <span class="label-text">Passkey Name (optional)</span>
+                    </label>
+                    <input
+                        type="text"
+                        id="credential_name"
+                        name="credential_name"
+                        placeholder="e.g., MacBook, YubiKey"
+                        class="input input-bordered w-full"
+                    />
+                </div>
+
+                <div class="card-actions mt-6">
+                    <button type="submit" id="register-btn" class="btn btn-primary w-full">
+                        Register Passkey
+                    </button>
+                </div>
+            </form>
+            {% else %}
+            <div class="alert mt-4">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-info shrink-0 w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                <div>
+                    <div class="font-bold">Registration is currently disabled.</div>
+                    <div class="text-sm">Contact an administrator to create an account.</div>
+                </div>
+            </div>
+            {% endif %}
+
+            <div id="error" class="alert alert-error mt-4 hidden">
+                <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                <span id="error-text"></span>
+            </div>
+
+            <div class="divider">OR</div>
+
+            <a href="/ui/login" class="btn btn-ghost w-full">
+                Already have an account? Login
+            </a>
+        </div>
+    </div>
+</div>
+
+{% if can_register %}
+<script>
+// Convert base64url to ArrayBuffer
+function base64urlToBuffer(base64url) {
+    const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+    const padding = '='.repeat((4 - base64.length % 4) % 4);
+    const binary = atob(base64 + padding);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes.buffer;
+}
+
+// Convert ArrayBuffer to base64url
+function bufferToBase64url(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+document.getElementById('register-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const errorDiv = document.getElementById('error');
+    const errorText = document.getElementById('error-text');
+    const registerBtn = document.getElementById('register-btn');
+    const username = document.getElementById('username').value;
+    const displayName = document.getElementById('display_name').value || null;
+    const credentialName = document.getElementById('credential_name').value || null;
+
+    errorDiv.classList.add('hidden');
+    registerBtn.disabled = true;
+    registerBtn.innerHTML = '<span class="loading loading-spinner"></span> Registering...';
+
+    try {
+        // Start registration
+        const startRes = await fetch('/ui/register/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, display_name: displayName })
+        });
+
+        if (!startRes.ok) {
+            const data = await startRes.json();
+            throw new Error(data.error || 'Registration failed');
+        }
+
+        const { challenge } = await startRes.json();
+
+        // Convert challenge data
+        challenge.publicKey.challenge = base64urlToBuffer(challenge.publicKey.challenge);
+        challenge.publicKey.user.id = base64urlToBuffer(challenge.publicKey.user.id);
+        if (challenge.publicKey.excludeCredentials) {
+            challenge.publicKey.excludeCredentials = challenge.publicKey.excludeCredentials.map(cred => ({
+                ...cred,
+                id: base64urlToBuffer(cred.id)
+            }));
+        }
+
+        // Browser passkey prompt
+        const credential = await navigator.credentials.create({
+            publicKey: challenge.publicKey
+        });
+
+        // Prepare credential for server
+        const credentialData = {
+            id: credential.id,
+            rawId: bufferToBase64url(credential.rawId),
+            type: credential.type,
+            response: {
+                attestationObject: bufferToBase64url(credential.response.attestationObject),
+                clientDataJSON: bufferToBase64url(credential.response.clientDataJSON)
+            }
+        };
+
+        // Finish registration
+        const finishRes = await fetch('/ui/register/finish', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                username,
+                display_name: displayName,
+                credential: credentialData,
+                credential_name: credentialName
+            })
+        });
+
+        const result = await finishRes.json();
+
+        if (result.success) {
+            window.location.href = result.redirect || '/ui';
+        } else {
+            throw new Error(result.error || 'Registration failed');
+        }
+    } catch (err) {
+        console.error('Registration error:', err);
+        errorText.textContent = err.message || 'Registration failed. Please try again.';
+        errorDiv.classList.remove('hidden');
+    } finally {
+        registerBtn.disabled = false;
+        registerBtn.innerHTML = 'Register Passkey';
+    }
+});
+</script>
+{% endif %}
+{% endblock %}

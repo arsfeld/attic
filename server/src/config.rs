@@ -132,6 +132,11 @@ pub struct Config {
     #[serde(default = "Default::default")]
     pub jwt: JWTConfig,
 
+    /// Web UI configuration.
+    #[serde(rename = "web-ui")]
+    #[serde(default = "Default::default")]
+    pub web_ui: WebUiConfig,
+
     /// (Deprecated Stub)
     ///
     /// This simply results in an error telling the user to update
@@ -330,6 +335,85 @@ pub enum CompressionType {
     /// XZ.
     #[serde(rename = "xz")]
     Xz,
+}
+
+/// Web UI configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebUiConfig {
+    /// Whether the web UI is enabled.
+    #[serde(default = "default_web_ui_enabled")]
+    pub enabled: bool,
+
+    /// Relying Party ID for WebAuthn.
+    ///
+    /// This should be the domain name (e.g., "cache.example.com").
+    /// If not set, the web UI will not be available.
+    #[serde(rename = "rp-id")]
+    pub rp_id: Option<String>,
+
+    /// Relying Party origin for WebAuthn.
+    ///
+    /// This should be the full URL (e.g., "https://cache.example.com").
+    /// If not set, it will be synthesized from rp-id.
+    #[serde(rename = "rp-origin")]
+    pub rp_origin: Option<String>,
+
+    /// Registration policy.
+    ///
+    /// Controls who can register new accounts.
+    #[serde(rename = "registration", default)]
+    pub registration: RegistrationPolicy,
+
+    /// Session duration.
+    ///
+    /// How long sessions remain valid.
+    #[serde(rename = "session-duration")]
+    #[serde(with = "humantime_serde", default = "default_session_duration")]
+    pub session_duration: Duration,
+
+    /// Cookie signing key.
+    ///
+    /// A base64-encoded 64-byte key for signing session cookies.
+    /// If not provided, a random key will be generated at startup
+    /// (sessions won't persist across restarts).
+    #[serde(rename = "cookie-key-base64")]
+    pub cookie_key_base64: Option<String>,
+}
+
+/// Registration policy for the web UI.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RegistrationPolicy {
+    /// Only the first user can register (becomes admin).
+    #[default]
+    FirstUser,
+
+    /// Registration is disabled, admins must create users.
+    InviteOnly,
+
+    /// Registration is completely disabled.
+    Disabled,
+}
+
+impl Default for WebUiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            rp_id: None,
+            rp_origin: None,
+            registration: RegistrationPolicy::default(),
+            session_duration: default_session_duration(),
+            cookie_key_base64: None,
+        }
+    }
+}
+
+fn default_web_ui_enabled() -> bool {
+    false
+}
+
+fn default_session_duration() -> Duration {
+    Duration::from_secs(7 * 24 * 60 * 60) // 7 days
 }
 
 /// Garbage collection config.
