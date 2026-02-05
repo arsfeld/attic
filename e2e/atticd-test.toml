@@ -1,0 +1,47 @@
+# Attic Server Configuration for E2E Testing
+# This config is used when running tests in Docker
+
+listen = "[::]:8080"
+
+# Allow all hosts for testing
+allowed-hosts = []
+
+# Database connection (SQLite file in /data)
+[database]
+url = "sqlite:///data/test.db"
+
+# Local file storage
+[storage]
+type = "local"
+path = "/data/storage"
+
+# Chunking configuration
+[chunking]
+nar-size-threshold = 65536
+min-size = 16384
+avg-size = 65536
+max-size = 262144
+
+# Compression
+[compression]
+type = "zstd"
+
+# Garbage collection (disabled for tests)
+[garbage-collection]
+interval = "0"
+
+# JWT configuration
+[jwt]
+
+[jwt.signing]
+# Test-only HS256 secret (DO NOT USE IN PRODUCTION)
+# This is a randomly generated key for testing purposes only
+token-hs256-secret-base64 = "dGVzdC1zZWNyZXQtZm9yLWUyZS10ZXN0aW5nLW9ubHktZG8tbm90LXVzZS1pbi1wcm9kdWN0aW9u"
+
+# Web UI configuration
+[web-ui]
+enabled = true
+rp-id = "localhost"
+rp-origin = "http://localhost:8080"
+registration = "FirstUser"
+session-duration = "1 hour"

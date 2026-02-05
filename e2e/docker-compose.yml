@@ -1,0 +1,60 @@
+version: "3.8"
+
+services:
+  # All-in-one E2E test runner
+  # Runs atticd and Playwright tests in the same container
+  e2e:
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile
+      target: e2e-runner
+      cache_from:
+        - type=local,src=/tmp/.buildx-cache
+      cache_to:
+        - type=local,dest=/tmp/.buildx-cache-new,mode=max
+    environment:
+      - ATTIC_BASE_URL=http://localhost:8080
+      - CI=${CI:-}
+    volumes:
+      # Persist test results
+      - ./test-results:/e2e/test-results
+      - ./playwright-report:/e2e/playwright-report
+    # Override to run specific tests
+    # command: npx playwright test tests/auth.spec.ts
+
+  # Alternative: Separate services for atticd and tests
+  atticd:
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile
+      target: server
+    volumes:
+      - atticd-data:/data
+      - ./atticd-test.toml:/config/atticd.toml:ro
+    command: ["atticd", "-f", "/config/atticd.toml"]
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/version"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  playwright:
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile
+      target: playwright
+    depends_on:
+      atticd:
+        condition: service_healthy
+    environment:
+      - ATTIC_BASE_URL=http://atticd:8080
+      - CI=${CI:-}
+    volumes:
+      - ./test-results:/e2e/test-results
+      - ./playwright-report:/e2e/playwright-report
+    network_mode: "service:atticd"
+
+volumes:
+  atticd-data:
